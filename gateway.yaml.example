@@ -1,0 +1,40 @@
+# gateway.yaml.example — скопируй в gateway.yaml и заполни своими значениями
+
+gateway:
+  host: "0.0.0.0"
+  port: 8080
+
+# Auth: укажи свою реализацию BaseAuthProvider
+# StaticKeyAuthProvider — только для быстрого старта, не для production
+auth:
+  module: "gateway.middleware.auth.StaticKeyAuthProvider"
+  config:
+    keys:
+      # Используй переменную окружения вместо хардкода ключа:
+      # "${GATEWAY_KEY_DEV}":
+      "sk-change-me":
+        user_id: "dev"
+        team_id: "engineering"
+
+# Адаптеры: один обязательный default
+adapters:
+  # Вариант 1: любой OpenAI-compatible endpoint (нет кода, только конфиг)
+  - name: openai
+    type: openai_compatible
+    base_url: "https://api.openai.com/v1"
+    auth:
+      token_env: OPENAI_API_KEY   # читается из переменной окружения
+    default: true
+
+  # Вариант 2: свой адаптер (Python-класс)
+  # - name: corp-llm
+  #   type: plugin
+  #   module: "my_adapters.corp_llm.CorpLLMAdapter"
+
+sanitizers:
+  # v1: пустые цепочки (pass-through)
+  input: []
+  output: []
+
+audit:
+  backend: "stdout"   # JSON lines → stdout → ELK/Splunk/etc
