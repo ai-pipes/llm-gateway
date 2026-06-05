@@ -1,0 +1,11 @@
+services:
+  gateway:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./gateway.yaml:/app/gateway.yaml:ro
+    environment:
+      # Ключи адаптеров — через env, не в конфиг-файле
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    restart: unless-stopped

@@ -2,6 +2,10 @@ import hashlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
 
 @dataclass
 class AuthContext:
@@ -40,3 +44,25 @@ class StaticKeyAuthProvider(BaseAuthProvider):
             user_id=entry.get("user_id"),
             team_id=entry.get("team_id"),
         )
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    def __init__(self, app, provider: BaseAuthProvider):
+        super().__init__(app)
+        self._provider = provider
+
+    async def dispatch(self, request: Request, call_next):
+        ctx = await self._provider.authenticate(request)
+        if ctx is None:
+            return JSONResponse(
+                {
+                    "error": {
+                        "type": "auth_error",
+                        "message": "Invalid or missing API key",
+                        "code": "unauthorized",
+                    }
+                },
+                status_code=401,
+            )
+        request.state.auth = ctx
+        return await call_next(request)
