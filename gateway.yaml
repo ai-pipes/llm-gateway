@@ -20,9 +20,9 @@ adapters:
 
 sanitizers:
   input:
-    - module: "gateway.infrastructure.sanitizers.pii_regex.PiiRegexSanitizer"
+    - module: "gateway.infrastructure.sanitizers.presidio_sanitizer.PresidioSanitizer"
       config:
-        mode: replace
+        language: en
   output: []
 
 audit:
