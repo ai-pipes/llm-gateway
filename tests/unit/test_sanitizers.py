@@ -1,6 +1,6 @@
 import pytest
-from gateway.sanitizers.base import BaseSanitizer, SanitizerChain, SanitizeResult
-from gateway.sanitizers.passthrough import PassthroughSanitizer
+from gateway.domain.sanitizers.base import BaseSanitizer, SanitizerChain, SanitizeResult
+from gateway.infrastructure.sanitizers.passthrough import PassthroughSanitizer
 
 
 def test_sanitize_result_defaults():

@@ -1,5 +1,5 @@
 import pytest
-from gateway.sanitizers.pii_regex import PiiRegexSanitizer
+from gateway.infrastructure.sanitizers.pii_regex import PiiRegexSanitizer
 
 
 @pytest.mark.asyncio

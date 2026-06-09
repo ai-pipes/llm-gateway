@@ -1,6 +1,8 @@
 import pytest
 from unittest.mock import MagicMock
-from gateway.middleware.auth import AuthContext, BaseAuthProvider, StaticKeyAuthProvider
+from gateway.domain.models import AuthContext
+from gateway.infrastructure.auth.base import BaseAuthProvider
+from gateway.infrastructure.auth.static_key import StaticKeyAuthProvider
 
 
 def test_auth_context_fields():

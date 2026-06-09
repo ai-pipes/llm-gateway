@@ -1,12 +1,13 @@
+# tests/conftest.py
 import pytest
 from fastapi.testclient import TestClient
-from gateway.adapters.base import BaseLLMAdapter, ChatRequest, ChatResponse
-from gateway.adapters.registry import AdapterRegistry
-from gateway.audit.base import BaseAuditBackend
-from gateway.audit.record import AuditRecord
+from gateway.domain.adapters.base import BaseLLMAdapter
+from gateway.domain.models import ChatRequest, ChatResponse, AuditRecord
+from gateway.infrastructure.adapters.registry import AdapterRegistry
+from gateway.domain.audit.base import BaseAuditBackend
 from gateway.app import create_app_from_components
-from gateway.middleware.auth import StaticKeyAuthProvider
-from gateway.sanitizers.base import SanitizerChain
+from gateway.infrastructure.auth.static_key import StaticKeyAuthProvider
+from gateway.domain.sanitizers.base import SanitizerChain
 
 
 class MockLLMAdapter(BaseLLMAdapter):

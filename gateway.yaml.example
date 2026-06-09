@@ -7,7 +7,7 @@ gateway:
 # Auth: укажи свою реализацию BaseAuthProvider
 # StaticKeyAuthProvider — только для быстрого старта, не для production
 auth:
-  module: "gateway.middleware.auth.StaticKeyAuthProvider"
+  module: "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider"
   config:
     keys:
       # Используй переменную окружения вместо хардкода ключа:
@@ -39,12 +39,16 @@ sanitizers:
   output: []
 
 audit:
-  type: stdout   # JSON lines → stdout → ELK/Splunk/etc
+  type: stdout   # stdout | file | plugin
+  body_logging:
+    enabled: false   # set true for compliance logging (logs full messages + completion)
 
 # File backend — writes JSON lines to a local file:
 # audit:
 #   type: file
 #   path: "/var/log/gateway/audit.jsonl"
+#   body_logging:
+#     enabled: true
 
 # Plugin backend — custom backend (Python class):
 # audit:

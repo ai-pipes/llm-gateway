@@ -1,10 +1,10 @@
 import pytest
 from pathlib import Path
-from gateway.sanitizers.base import BaseSanitizer, SanitizerChain, SanitizeResult
-from gateway.adapters.registry import AdapterRegistry
+from gateway.domain.sanitizers.base import BaseSanitizer, SanitizerChain, SanitizeResult
+from gateway.infrastructure.adapters.registry import AdapterRegistry
 from gateway.app import create_app_from_components
-from gateway.middleware.auth import StaticKeyAuthProvider
-from gateway.audit.record import AuditRecord
+from gateway.infrastructure.auth.static_key import StaticKeyAuthProvider
+from gateway.domain.models import AuditRecord
 from fastapi.testclient import TestClient
 
 
@@ -129,7 +129,7 @@ def test_response_is_openai_compatible(client):
 
 def test_pii_replaced_in_request(audit_capture):
     """PII в теле запроса заменяется, ответ приходит успешно, аудит содержит replaced:EMAIL."""
-    from gateway.sanitizers.pii_regex import PiiRegexSanitizer
+    from gateway.infrastructure.sanitizers.pii_regex import PiiRegexSanitizer
     from tests.conftest import MockLLMAdapter
 
     registry = AdapterRegistry()
@@ -166,7 +166,7 @@ def test_create_app_raises_on_bad_sanitizer_module(tmp_path):
     config = {
         "gateway": {"host": "0.0.0.0", "port": 8080},
         "auth": {
-            "module": "gateway.middleware.auth.StaticKeyAuthProvider",
+            "module": "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider",
             "config": {"keys": {"sk-test": {"user_id": "u", "team_id": "t"}}},
         },
         "adapters": [],
@@ -188,7 +188,7 @@ def test_create_app_raises_on_bad_sanitizer_module(tmp_path):
 def test_audit_writes_to_file(tmp_path):
     """Full stack request with FileAuditBackend — JSON line appears in the file."""
     import json
-    from gateway.audit.file_backend import FileAuditBackend
+    from gateway.infrastructure.audit.file_backend import FileAuditBackend
 
     audit_path = str(tmp_path / "audit.jsonl")
     backend = FileAuditBackend(path=audit_path)
@@ -229,7 +229,7 @@ def test_create_app_wires_file_audit_backend(tmp_path, monkeypatch):
     config = {
         "gateway": {"host": "0.0.0.0", "port": 8080},
         "auth": {
-            "module": "gateway.middleware.auth.StaticKeyAuthProvider",
+            "module": "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider",
             "config": {"keys": {"sk-test": {"user_id": "u", "team_id": "t"}}},
         },
         "adapters": [],
@@ -253,3 +253,44 @@ def test_create_app_wires_file_audit_backend(tmp_path, monkeypatch):
     assert len(lines) == 1
     record = json.loads(lines[0])
     assert record["user_id"] == "u"
+
+
+def test_body_logging_writes_messages_and_completion(tmp_path):
+    """With log_body=True, AuditRecord contains sanitized messages and completion text."""
+    from tests.conftest import MockLLMAdapter, CapturingAuditBackend
+
+    audit = CapturingAuditBackend()
+    registry = AdapterRegistry()
+    registry.register(MockLLMAdapter(), default=True)
+
+    app = create_app_from_components(
+        auth_provider=StaticKeyAuthProvider({"test-key": {"user_id": "u", "team_id": "t"}}),
+        input_chain=SanitizerChain([]),
+        output_chain=SanitizerChain([]),
+        audit_backend=audit,
+        registry=registry,
+        log_body=True,
+    )
+    c = TestClient(app, raise_server_exceptions=False)
+    c.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]},
+        headers={"x-api-key": "test-key"},
+    )
+
+    record = audit.last()
+    assert record.status == "success"
+    assert record.messages == [{"role": "user", "content": "Hello"}]
+    assert record.completion == "Hello from mock!"
+
+
+def test_body_logging_disabled_by_default(client, audit_capture):
+    """Default: messages and completion are None in audit record."""
+    client.post(
+        "/v1/chat/completions",
+        json={"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]},
+        headers={"x-api-key": "test-key"},
+    )
+    record = audit_capture.last()
+    assert record.messages is None
+    assert record.completion is None

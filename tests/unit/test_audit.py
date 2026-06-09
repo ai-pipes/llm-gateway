@@ -3,9 +3,9 @@ import pytest
 from datetime import datetime, timezone
 from io import StringIO
 from unittest.mock import patch
-from gateway.audit.record import AuditRecord
-from gateway.audit.base import BaseAuditBackend
-from gateway.audit.stdout_backend import StdoutAuditBackend
+from gateway.domain.models import AuditRecord
+from gateway.domain.audit.base import BaseAuditBackend
+from gateway.infrastructure.audit.stdout_backend import StdoutAuditBackend
 
 
 def make_record(**kwargs) -> AuditRecord:

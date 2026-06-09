@@ -2,8 +2,8 @@ import json
 import pytest
 from datetime import datetime, timezone
 from pathlib import Path
-from gateway.audit.file_backend import FileAuditBackend
-from gateway.audit.record import AuditRecord
+from gateway.infrastructure.audit.file_backend import FileAuditBackend
+from gateway.domain.models import AuditRecord
 
 
 def _make_record(**kwargs) -> AuditRecord:

@@ -2,9 +2,10 @@ import pytest
 import json
 import httpx
 from unittest.mock import AsyncMock, patch
-from gateway.adapters.base import ChatMessage, ChatRequest, ChatResponse, BaseLLMAdapter
-from gateway.adapters.registry import AdapterRegistry
-from gateway.adapters.openai_compatible import OpenAICompatibleAdapter
+from gateway.domain.models import ChatMessage, ChatRequest, ChatResponse
+from gateway.domain.adapters.base import BaseLLMAdapter
+from gateway.infrastructure.adapters.registry import AdapterRegistry
+from gateway.infrastructure.adapters.openai_compatible import OpenAICompatibleAdapter
 
 
 def test_chat_message_has_role_and_content():

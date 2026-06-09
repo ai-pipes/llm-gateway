@@ -4,6 +4,32 @@
 
 ---
 
+## v3.0 — Layered Architecture + Body Logging (2026-06-09)
+
+**Breaking changes:**
+- Import paths for all base classes and implementations have changed. Old paths (`gateway.middleware.auth`, `gateway.audit.base`, `gateway.adapters.base`, `gateway.sanitizers.base`) are removed. New paths:
+  - `gateway.infrastructure.auth.static_key.StaticKeyAuthProvider`
+  - `gateway.infrastructure.auth.static_key.AuthMiddleware`
+  - `gateway.infrastructure.auth.base.BaseAuthProvider`
+  - `gateway.domain.audit.base.BaseAuditBackend`
+  - `gateway.domain.adapters.base.BaseLLMAdapter`
+  - `gateway.domain.sanitizers.base.BaseSanitizer`, `SanitizerChain`
+  - `gateway.infrastructure.audit.stdout_backend.StdoutAuditBackend`
+  - `gateway.infrastructure.audit.file_backend.FileAuditBackend`
+  - `gateway.infrastructure.adapters.openai_compatible.OpenAICompatibleAdapter`
+  - `gateway.infrastructure.sanitizers.pii_regex.PiiRegexSanitizer`
+
+**Architecture changes:**
+- `SanitizeMiddleware` and `AuditLogMiddleware` removed. Logic consolidated into `ChatService` (application layer).
+- New layer structure: `api/openai/` → `application/` → `domain/` → `infrastructure/`.
+- `request.state` no longer used as an implicit data channel between layers.
+
+**New feature:**
+- `AuditRecord` now has optional `messages: list[dict] | None` and `completion: str | None` fields.
+- Opt-in body logging: `audit.body_logging.enabled: true` logs full sanitized messages and LLM completion in every audit record.
+
+---
+
 ## 2026-06-05 — Старт проекта и исследование ландшафта
 
 ### Почему этот проект

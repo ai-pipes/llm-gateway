@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>LLM Gateway — Architecture</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.6/dist/mermaid.min.js" integrity="sha384-qX9VvWkP79m/O121ZE6sOYp0nf/pldQgtvWDbkpzi+3mUo4Wn4Ix4cFzNPay3VaB" crossorigin="anonymous"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      margin: 0;
+      padding: 32px;
+    }
+    h1 { color: #f8fafc; font-size: 1.4rem; margin-bottom: 4px; }
+    h2 { color: #94a3b8; font-size: 1rem; font-weight: 500; margin: 40px 0 8px; }
+    p.note {
+      color: #64748b;
+      font-size: 0.85rem;
+      margin: 0 0 20px;
+    }
+    .diagram-card {
+      background: #1e2330;
+      border: 1px solid #2d3347;
+      border-radius: 12px;
+      padding: 32px;
+      margin-bottom: 32px;
+      overflow-x: auto;
+    }
+    .mermaid svg { max-width: 100%; }
+
+    /* highlight problem zones */
+    .badge {
+      display: inline-block;
+      font-size: 0.72rem;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+    .badge-warn  { background: #7c3d00; color: #fbbf24; }
+    .badge-ok    { background: #14532d; color: #4ade80; }
+  </style>
+</head>
+<body>
+  <h1>LLM Gateway — Request Flow</h1>
+
+  <h2>1. Текущий стек (v2.2) <span class="badge badge-ok">as-is</span></h2>
+  <p class="note">Порядок обработки: Auth → Sanitize → Audit → Handler. Регистрация в app.py — обратная.</p>
+  <div class="diagram-card">
+    <div class="mermaid">
+sequenceDiagram
+    participant C as Client
+    participant AM as AuthMiddleware
+    participant SM as SanitizeMiddleware
+    participant AL as AuditLogMiddleware
+    participant H as GatewayHandler
+    participant LLM as LLM Adapter
+
+    C->>AM: POST /v1/chat/completions
+    Note over AM: authenticate(request)<br/>→ AuthContext | 401
+    AM->>SM: + state.auth
+
+    Note over SM: читает body bytes<br/>санитайзит messages<br/>state.input_actions<br/>state.audit_status<br/>переписывает _receive
+    SM->>AL: sanitized request
+
+    Note over AL: state.request_id<br/>запоминает start_time
+    AL->>H: call_next
+
+    Note over H: body → ChatRequest<br/>adapter.chat()<br/>state.model<br/>state.prompt_tokens<br/>state.completion_tokens
+    H->>LLM: ChatRequest
+    LLM-->>H: ChatResponse
+
+    H-->>AL: JSONResponse
+    Note over AL: собирает AuditRecord<br/>из request.state<br/>пишет в backend → 500 если fail
+    AL-->>SM: response
+
+    Note over SM: output sanitize (no-op)<br/>state.output_actions = []
+    SM-->>AM: response
+    AM-->>C: response
+    </div>
+  </div>
+
+  <h2>2. Что есть в <code>request.state</code> к моменту записи аудита</h2>
+  <p class="note">AuditLogMiddleware читает state после call_next. Жёлтым — чего сейчас нет, но нужно для body logging.</p>
+  <div class="diagram-card">
+    <div class="mermaid">
+flowchart LR
+    subgraph state["request.state к моменту AuditLogMiddleware.write()"]
+        direction TB
+        A1["✅ auth (key_id, user_id, team_id)"]
+        A2["✅ request_id"]
+        A3["✅ adapter_name"]
+        A4["✅ model"]
+        A5["✅ prompt_tokens"]
+        A6["✅ completion_tokens"]
+        A7["✅ input_actions"]
+        A8["✅ output_actions"]
+        A9["✅ audit_status"]
+        A10["✅ audit_error"]
+        B1["⚠️ sanitized_messages — нет"]
+        B2["⚠️ completion_text — нет"]
+    end
+
+    subgraph owner["Кто должен это положить"]
+        direction TB
+        O1["SanitizeMiddleware → sanitized_messages"]
+        O2["GatewayHandler → completion_text"]
+    end
+
+    B1 -.->|нужно добавить| O1
+    B2 -.->|нужно добавить| O2
+
+    style B1 fill:#7c3d00,stroke:#f59e0b,color:#fbbf24
+    style B2 fill:#7c3d00,stroke:#f59e0b,color:#fbbf24
+    style O1 fill:#1e3a5f,stroke:#3b82f6,color:#93c5fd
+    style O2 fill:#1e3a5f,stroke:#3b82f6,color:#93c5fd
+    </div>
+  </div>
+
+  <h2>3. Проблема: output sanitization gap <span class="badge badge-warn">нюанс</span></h2>
+  <p class="note">
+    completion_text кладётся в state в Handler — до того, как SanitizeMiddleware сделает output sanitize.
+    Сейчас это no-op, но архитектурно: лог будет содержать НЕсанитайзированный ответ, если output sanitize когда-либо заработает.
+  </p>
+  <div class="diagram-card">
+    <div class="mermaid">
+sequenceDiagram
+    participant H as GatewayHandler
+    participant AL as AuditLogMiddleware
+    participant SM as SanitizeMiddleware
+
+    H->>H: state.completion_text = response.content
+    H-->>AL: JSONResponse
+    Note over AL: читает state.completion_text ✅<br/>(но это ДО output sanitize)
+    AL-->>SM: response
+    Note over SM: output sanitize здесь<br/>state.completion_text уже в логе ⚠️
+    </div>
+  </div>
+
+  <h2>4. Предлагаемое решение: два новых поля в <code>AuditRecord</code></h2>
+  <p class="note">
+    Оба поля — <code>None</code> по умолчанию. Заполняются только если <code>audit.body_logging.enabled: true</code>.
+  </p>
+  <div class="diagram-card">
+    <div class="mermaid">
+classDiagram
+    class AuditRecord {
+        +str request_id
+        +datetime timestamp
+        +str api_key_id
+        +str|None user_id
+        +str|None team_id
+        +str adapter
+        +str model
+        +int prompt_tokens
+        +int completion_tokens
+        +int latency_ms
+        +list~str~ input_actions
+        +list~str~ output_actions
+        +str status
+        +str|None error
+        +list~dict~|None messages
+        +str|None completion
+    }
+
+    class AuditConfig {
+        &lt;&lt;discriminated union&gt;&gt;
+        type: stdout | file | plugin
+        body_logging: BodyLoggingConfig | None
+    }
+
+    class BodyLoggingConfig {
+        +bool enabled
+    }
+
+    AuditConfig --> BodyLoggingConfig
+    AuditConfig --> AuditRecord : writes
+    </div>
+  </div>
+</body>
+<script>
+  mermaid.initialize({ startOnLoad: true, theme: "dark" });
+</script>
+</html>

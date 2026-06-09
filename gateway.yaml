@@ -1,0 +1,31 @@
+gateway:
+  host: "0.0.0.0"
+  port: 8080
+
+auth:
+  module: "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider"
+  config:
+    keys:
+      "sk-dev":
+        user_id: "dev"
+        team_id: "engineering"
+
+adapters:
+  - name: openai
+    type: openai_compatible
+    base_url: "https://api.openai.com/v1"
+    auth:
+      token_env: OPENAI_API_KEY
+    default: true
+
+sanitizers:
+  input:
+    - module: "gateway.infrastructure.sanitizers.pii_regex.PiiRegexSanitizer"
+      config:
+        mode: replace
+  output: []
+
+audit:
+  type: stdout
+  body_logging:
+    enabled: true
