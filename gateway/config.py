@@ -57,19 +57,26 @@ class SanitizersConfig(BaseModel):
     output: list[SanitizerItemConfig] = []
 
 
+class BodyLoggingConfig(BaseModel):
+    enabled: bool = False
+
+
 class StdoutAuditConfig(BaseModel):
     type: Literal["stdout"] = "stdout"
+    body_logging: BodyLoggingConfig = BodyLoggingConfig()
 
 
 class FileAuditConfig(BaseModel):
     type: Literal["file"]
     path: str = Field(min_length=1)
+    body_logging: BodyLoggingConfig = BodyLoggingConfig()
 
 
 class PluginAuditConfig(BaseModel):
     type: Literal["plugin"]
     module: str
     config: dict = Field(default_factory=dict)
+    body_logging: BodyLoggingConfig = BodyLoggingConfig()
 
 
 AuditConfig = Annotated[

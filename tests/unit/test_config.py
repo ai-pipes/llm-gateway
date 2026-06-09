@@ -150,3 +150,47 @@ def test_stdout_audit_config_default(tmp_path):
     p.write_text(content)
     config = load_config(str(p))
     assert config.audit.type == "stdout"
+
+
+def test_body_logging_disabled_by_default_stdout():
+    data = {
+        "auth": {"module": "gateway.middleware.auth.StaticKeyAuthProvider", "config": {"keys": {}}},
+        "audit": {"type": "stdout"},
+    }
+    from gateway.config import Config
+    config = Config.model_validate(data)
+    assert config.audit.body_logging.enabled is False
+
+
+def test_body_logging_can_be_enabled_on_stdout():
+    data = {
+        "auth": {"module": "gateway.middleware.auth.StaticKeyAuthProvider", "config": {"keys": {}}},
+        "audit": {"type": "stdout", "body_logging": {"enabled": True}},
+    }
+    from gateway.config import Config
+    config = Config.model_validate(data)
+    assert config.audit.body_logging.enabled is True
+
+
+def test_body_logging_disabled_by_default_file():
+    data = {
+        "auth": {"module": "gateway.middleware.auth.StaticKeyAuthProvider", "config": {"keys": {}}},
+        "audit": {"type": "file", "path": "/tmp/audit.jsonl"},
+    }
+    from gateway.config import Config
+    config = Config.model_validate(data)
+    assert config.audit.body_logging.enabled is False
+
+
+def test_body_logging_on_plugin_audit():
+    data = {
+        "auth": {"module": "gateway.middleware.auth.StaticKeyAuthProvider", "config": {"keys": {}}},
+        "audit": {
+            "type": "plugin",
+            "module": "some.backend.Backend",
+            "body_logging": {"enabled": True},
+        },
+    }
+    from gateway.config import Config
+    config = Config.model_validate(data)
+    assert config.audit.body_logging.enabled is True
