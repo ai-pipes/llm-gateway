@@ -1,6 +1,10 @@
+import json
 import uuid
+from typing import AsyncIterator
+
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+
 from gateway.application.chat_service import ChatService
 from gateway.domain.exceptions import (
     SanitizerBlockedError, AdapterNotFoundError, UpstreamTimeoutError, UpstreamError,
@@ -14,6 +18,12 @@ def create_router(chat_service: ChatService) -> APIRouter:
     async def chat_completions(request: Request):
         body = await request.json()
         request_id = str(uuid.uuid4())
+
+        if body.get("stream"):
+            return StreamingResponse(
+                _sse_stream(chat_service, body, request, request_id),
+                media_type="text/event-stream",
+            )
 
         try:
             response = await chat_service.complete(
@@ -44,7 +54,7 @@ def create_router(chat_service: ChatService) -> APIRouter:
                            "code": "upstream_timeout"}},
                 status_code=504,
             )
-        except UpstreamError as e:
+        except UpstreamError:
             return JSONResponse(
                 {"error": {"type": "upstream_error",
                            "message": "LLM request failed",
@@ -67,3 +77,51 @@ def create_router(chat_service: ChatService) -> APIRouter:
         }
 
     return router
+
+
+async def _sse_stream(
+    chat_service: ChatService,
+    body: dict,
+    request: Request,
+    request_id: str,
+) -> AsyncIterator[str]:
+    chunk_id = f"chatcmpl-{request_id}"
+    model = body.get("model", "")
+
+    def _chunk(content: str, finish_reason=None, delta: dict | None = None) -> str:
+        payload = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [{"index": 0, "delta": delta if delta is not None else {"content": content}, "finish_reason": finish_reason}],
+        }
+        return f"data: {json.dumps(payload)}\n\n"
+
+    def _error(code: str, message: str) -> str:
+        payload = {"error": {"type": "gateway_error", "code": code, "message": message}}
+        return f"data: {json.dumps(payload)}\n\n"
+
+    try:
+        async for chunk in chat_service.complete_stream(
+            raw_messages=body.get("messages", []),
+            model=model,
+            auth=request.state.auth,
+            request_id=request_id,
+            adapter_name=body.get("adapter"),
+        ):
+            yield _chunk(chunk)
+
+        yield _chunk("", finish_reason="stop", delta={})
+
+    except SanitizerBlockedError as e:
+        yield _error("sanitizer_blocked", f"Input blocked: {e.reason}")
+    except AdapterNotFoundError:
+        yield _error("adapter_not_found", "Adapter not found")
+    except UpstreamTimeoutError:
+        yield _error("upstream_timeout", "LLM request timed out")
+    except UpstreamError:
+        yield _error("upstream_error", "LLM request failed")
+    except Exception:
+        yield _error("internal_error", "An unexpected error occurred")
+    finally:
+        yield "data: [DONE]\n\n"

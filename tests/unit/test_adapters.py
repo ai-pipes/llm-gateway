@@ -1,7 +1,7 @@
 import pytest
-import json
+import json as _json
 import httpx
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from gateway.domain.models import ChatMessage, ChatRequest, ChatResponse
 from gateway.domain.adapters.base import BaseLLMAdapter
 from gateway.infrastructure.adapters.registry import AdapterRegistry
@@ -137,3 +137,112 @@ async def test_openai_adapter_raises_on_timeout(adapter):
                side_effect=httpx.TimeoutException("timed out")):
         with pytest.raises(httpx.TimeoutException):
             await adapter.chat(ChatRequest(model="gpt-4o", messages=[]))
+
+
+def _make_stream_mock(lines):
+    """Returns mock_cls for patching httpx.AsyncClient, with stream() returning SSE lines."""
+    async def _aiter_lines():
+        for line in lines:
+            yield line
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.aiter_lines = _aiter_lines
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+    mock_client = MagicMock()
+    mock_client.stream = MagicMock(return_value=mock_resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    return MagicMock(return_value=mock_client)
+
+
+async def test_stream_chat_yields_content_chunks(adapter):
+    lines = [
+        'data: ' + _json.dumps({"choices": [{"delta": {"content": "Hello"}, "index": 0}]}),
+        'data: ' + _json.dumps({"choices": [{"delta": {"content": " World"}, "index": 0}]}),
+        'data: [DONE]',
+    ]
+    mock_cls = _make_stream_mock(lines)
+    with patch("gateway.infrastructure.adapters.openai_compatible.httpx.AsyncClient", mock_cls):
+        request = ChatRequest(model="gpt-4o", messages=[ChatMessage(role="user", content="hi")])
+        chunks = [c async for c in adapter.stream_chat(request)]
+    assert chunks == ["Hello", " World"]
+
+
+async def test_stream_chat_populates_usage_out(adapter):
+    lines = [
+        'data: ' + _json.dumps({"choices": [{"delta": {"content": "Hi"}, "index": 0}]}),
+        'data: ' + _json.dumps({
+            "choices": [{"delta": {}, "index": 0}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+        }),
+        'data: [DONE]',
+    ]
+    mock_cls = _make_stream_mock(lines)
+    usage_out = {}
+    with patch("gateway.infrastructure.adapters.openai_compatible.httpx.AsyncClient", mock_cls):
+        request = ChatRequest(model="gpt-4o", messages=[])
+        _ = [c async for c in adapter.stream_chat(request, usage_out=usage_out)]
+    assert usage_out["prompt_tokens"] == 5
+    assert usage_out["completion_tokens"] == 2
+
+
+async def test_stream_chat_skips_empty_delta(adapter):
+    lines = [
+        'data: ' + _json.dumps({"choices": [{"delta": {"role": "assistant"}, "index": 0}]}),
+        'data: ' + _json.dumps({"choices": [{"delta": {"content": "Hi"}, "index": 0}]}),
+        'data: ' + _json.dumps({"choices": [{"delta": {}, "index": 0}]}),
+        'data: [DONE]',
+    ]
+    mock_cls = _make_stream_mock(lines)
+    with patch("gateway.infrastructure.adapters.openai_compatible.httpx.AsyncClient", mock_cls):
+        chunks = [c async for c in adapter.stream_chat(
+            ChatRequest(model="gpt-4o", messages=[]), usage_out=None
+        )]
+    assert chunks == ["Hi"]
+
+
+async def test_stream_chat_raises_on_http_error(adapter):
+    fake_request = httpx.Request("POST", "https://api.example.com/v1/chat/completions")
+    fake_resp = httpx.Response(429, request=fake_request)
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock(
+        side_effect=httpx.HTTPStatusError("429", request=fake_request, response=fake_resp)
+    )
+    mock_resp.aiter_lines = MagicMock()
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+    mock_client = MagicMock()
+    mock_client.stream = MagicMock(return_value=mock_resp)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    mock_cls = MagicMock(return_value=mock_client)
+    with patch("gateway.infrastructure.adapters.openai_compatible.httpx.AsyncClient", mock_cls):
+        with pytest.raises(httpx.HTTPStatusError):
+            _ = [c async for c in adapter.stream_chat(ChatRequest(model="x", messages=[]))]
+
+
+async def test_stream_chat_usage_after_done_sentinel(adapter):
+    # Some providers (OpenAI) send the usage chunk AFTER [DONE]
+    lines = [
+        'data: ' + _json.dumps({"choices": [{"delta": {"content": "Hi"}, "index": 0}]}),
+        'data: [DONE]',
+        'data: ' + _json.dumps({
+            "choices": [],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11},
+        }),
+    ]
+    mock_cls = _make_stream_mock(lines)
+    usage_out = {}
+    with patch("gateway.infrastructure.adapters.openai_compatible.httpx.AsyncClient", mock_cls):
+        chunks = [c async for c in adapter.stream_chat(
+            ChatRequest(model="gpt-4o", messages=[]), usage_out=usage_out
+        )]
+    assert chunks == ["Hi"]
+    assert usage_out["prompt_tokens"] == 8
+    assert usage_out["completion_tokens"] == 3

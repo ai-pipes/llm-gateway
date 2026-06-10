@@ -1,6 +1,7 @@
 import time
 import httpx
 from datetime import datetime, timezone
+from typing import AsyncGenerator
 
 from gateway.domain.models import AuthContext, ChatMessage, ChatRequest, ChatResponse, AuditRecord
 from gateway.domain.exceptions import (
@@ -26,18 +27,17 @@ class ChatService:
         self._audit = audit
         self._log_body = log_body
 
-    async def complete(
+    async def _sanitize_input(
         self,
         raw_messages: list[dict],
         model: str,
         auth: AuthContext,
         request_id: str,
-        adapter_name: str | None = None,
-    ) -> ChatResponse:
-        start = time.monotonic()
+        start: float,
+    ) -> tuple[list[dict], list[str]]:
+        """Returns (sanitized_messages, input_actions). Raises SanitizerBlockedError if blocked."""
         input_actions: list[str] = []
         sanitized_messages: list[dict] = []
-
         for msg in raw_messages:
             if isinstance(msg.get("content"), str):
                 result = await self._input.run(msg["content"])
@@ -55,9 +55,21 @@ class ChatService:
                 sanitized_messages.append({**msg, "content": result.text})
             else:
                 sanitized_messages.append(msg)
+        return sanitized_messages, input_actions
 
+    async def _resolve_adapter(
+        self,
+        adapter_name: str | None,
+        model: str,
+        auth: AuthContext,
+        request_id: str,
+        start: float,
+        input_actions: list[str],
+        sanitized_messages: list[dict],
+    ):
+        """Returns adapter. Raises AdapterNotFoundError if not found."""
         try:
-            adapter = self._registry.get(adapter_name)
+            return self._registry.get(adapter_name)
         except KeyError:
             await self._audit.write(self._record(
                 request_id=request_id, auth=auth, adapter="unknown", model=model,
@@ -68,6 +80,22 @@ class ChatService:
                 completion=None,
             ))
             raise AdapterNotFoundError(adapter_name)
+
+    async def complete(
+        self,
+        raw_messages: list[dict],
+        model: str,
+        auth: AuthContext,
+        request_id: str,
+        adapter_name: str | None = None,
+    ) -> ChatResponse:
+        start = time.monotonic()
+        sanitized_messages, input_actions = await self._sanitize_input(
+            raw_messages, model, auth, request_id, start
+        )
+        adapter = await self._resolve_adapter(
+            adapter_name, model, auth, request_id, start, input_actions, sanitized_messages
+        )
 
         chat_request = ChatRequest(
             model=model,
@@ -109,6 +137,76 @@ class ChatService:
         ))
 
         return response
+
+    async def complete_stream(
+        self,
+        raw_messages: list[dict],
+        model: str,
+        auth: AuthContext,
+        request_id: str,
+        adapter_name: str | None = None,
+    ) -> AsyncGenerator[str, None]:
+        start = time.monotonic()
+        sanitized_messages, input_actions = await self._sanitize_input(
+            raw_messages, model, auth, request_id, start
+        )
+        adapter = await self._resolve_adapter(
+            adapter_name, model, auth, request_id, start, input_actions, sanitized_messages
+        )
+
+        chat_request = ChatRequest(
+            model=model,
+            messages=[ChatMessage(**m) for m in sanitized_messages],
+            stream=True,
+        )
+
+        chunks: list[str] = []
+        usage_out: dict = {}
+        status = "success"
+        error: str | None = None
+        stream_complete = False
+
+        try:
+            async for chunk in adapter.stream_chat(chat_request, usage_out=usage_out):
+                chunks.append(chunk)
+                yield chunk
+            stream_complete = True
+
+        except httpx.TimeoutException:
+            status = "error"
+            error = "upstream_timeout"
+            raise UpstreamTimeoutError()
+        except Exception as exc:
+            status = "error"
+            error = str(exc)
+            raise UpstreamError(str(exc)) from exc
+        finally:
+            if not stream_complete and status == "success":
+                status = "cancelled"
+            full_text = "".join(chunks)
+            output_actions: list[str] = []
+            completion: str | None = None
+
+            if self._log_body and full_text:
+                out = await self._output.run(full_text)
+                completion = out.text
+                output_actions = out.actions
+
+            await self._audit.write(self._record(
+                request_id=request_id,
+                auth=auth,
+                adapter=adapter.name,
+                model=model,
+                prompt_tokens=usage_out.get("prompt_tokens", 0),
+                completion_tokens=usage_out.get("completion_tokens", 0),
+                latency_ms=_ms(start),
+                input_actions=input_actions,
+                output_actions=output_actions,
+                status=status,
+                error=error,
+                messages=sanitized_messages if self._log_body else None,
+                completion=completion,
+            ))
 
     def _record(
         self,

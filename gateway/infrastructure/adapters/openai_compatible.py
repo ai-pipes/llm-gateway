@@ -1,4 +1,6 @@
+import json
 import httpx
+from typing import AsyncGenerator
 from gateway.domain.adapters.base import BaseLLMAdapter
 from gateway.domain.models import ChatRequest, ChatResponse
 
@@ -18,19 +20,26 @@ class OpenAICompatibleAdapter(BaseLLMAdapter):
     def __repr__(self) -> str:
         return f"OpenAICompatibleAdapter(name={self.name!r}, base_url={self._base_url!r})"
 
+    def _build_payload(self, request: ChatRequest, stream: bool = False) -> dict:
+        payload = {
+            "model": request.model,
+            "messages": [
+                {"role": m.role, "content": m.content}
+                for m in request.messages
+            ],
+            "temperature": request.temperature,
+        }
+        if stream:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
+        return payload
+
     async def chat(self, request: ChatRequest) -> ChatResponse:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.post(
                 f"{self._base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self._api_key}"},
-                json={
-                    "model": request.model,
-                    "messages": [
-                        {"role": m.role, "content": m.content}
-                        for m in request.messages
-                    ],
-                    "temperature": request.temperature,
-                },
+                json=self._build_payload(request),
             )
             response.raise_for_status()
             data = response.json()
@@ -43,3 +52,37 @@ class OpenAICompatibleAdapter(BaseLLMAdapter):
             model=data.get("model", request.model),
             usage=data.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         )
+
+    async def stream_chat(
+        self, request: ChatRequest, usage_out: dict | None = None
+    ) -> AsyncGenerator[str, None]:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{self._base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                json=self._build_payload(request, stream=True),
+            ) as response:
+                response.raise_for_status()
+                stream_done = False
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    if payload == "[DONE]":
+                        stream_done = True
+                        continue  # keep iterating in case usage chunk follows
+                    data = json.loads(payload)
+                    if usage_out is not None and data.get("usage"):
+                        usage_out.update(data["usage"])
+                    if stream_done:
+                        continue  # don't yield content after [DONE]
+                    choices = data.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    if not isinstance(choice, dict):  # guard against choices: [null]
+                        continue
+                    content = choice.get("delta", {}).get("content", "")
+                    if content:
+                        yield content
