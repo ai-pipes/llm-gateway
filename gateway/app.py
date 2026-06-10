@@ -22,13 +22,13 @@ def create_app_from_components(
     """Собрать приложение из готовых компонентов. Используется в тестах и для DI."""
     app = FastAPI(title="LLM Gateway", version="0.1.0")
 
-    # Порядок add_middleware: последний добавленный = самый внешний (первым обрабатывает запрос)
-    # Итоговый порядок обработки запроса (снаружи внутрь):
-    #   AuthMiddleware → AuditLogMiddleware → SanitizeMiddleware → Route
-    # AuditLogMiddleware должен быть снаружи SanitizeMiddleware, чтобы фиксировать
-    # заблокированные запросы (status="blocked"), когда SanitizeMiddleware возвращает 400.
-    app.add_middleware(SanitizeMiddleware, input_chain=input_chain, output_chain=output_chain)
+    # Middleware add order: last added = outermost (first to process request).
+    # Execution order: AuthMiddleware → SanitizeMiddleware → AuditLogMiddleware → Route
+    # - Auth rejects unauthenticated requests before anything else (no audit written).
+    # - Sanitize runs before Audit: Audit only ever sees sanitized data.
+    # - Audit wraps Route: writes record for every authenticated request including blocked ones.
     app.add_middleware(AuditLogMiddleware, backend=audit_backend)
+    app.add_middleware(SanitizeMiddleware, input_chain=input_chain, output_chain=output_chain)
     app.add_middleware(AuthMiddleware, provider=auth_provider)
 
     app.include_router(create_router(registry))
@@ -47,9 +47,22 @@ def create_app(config_path: str = "gateway.yaml") -> FastAPI:
     auth_provider_cls = getattr(module, class_name)
     auth_provider = auth_provider_cls(**config.auth.config)
 
-    # Sanitizer chains (v1: empty)
-    input_chain = SanitizerChain([])
-    output_chain = SanitizerChain([])
+    # Wire sanitizer chains from config
+    def _load_chain(confs):
+        sanitizers = []
+        for s_conf in confs:
+            try:
+                mod_path, cls_name = s_conf.module.rsplit(".", 1)
+                mod = importlib.import_module(mod_path)
+                cls = getattr(mod, cls_name)
+                # CONTRACT: sanitizer __init__ must accept **config as keyword arguments
+                sanitizers.append(cls(**s_conf.config))
+            except (ImportError, AttributeError, ValueError, TypeError) as e:
+                raise ValueError(f"Cannot load sanitizer '{s_conf.module}': {e}") from e
+        return SanitizerChain(sanitizers)
+
+    input_chain = _load_chain(config.sanitizers.input)
+    output_chain = _load_chain(config.sanitizers.output)
 
     # Audit backend
     audit_backend = StdoutAuditBackend()

@@ -57,21 +57,33 @@ HTTP Request  POST /v1/chat/completions
 AuthMiddleware          → 401 если authenticate() вернул None
     │                      аудит НЕ пишется (не аутентифицирован)
     ▼
-InputSanitizeMiddleware → 400 если sanitizer заблокировал
-    │                      аудит пишется со status=blocked
+SanitizeMiddleware      → если sanitizer заблокировал:
+    │                      устанавливает request.state.audit_status = "blocked"
+    │                      передаёт управление дальше (не прерывает цепочку)
     ▼
-GatewayHandler          → 400 адаптер не найден
+AuditLogMiddleware      → оборачивает handler + все последующие шаги
+    │                      пишет запись ПОСЛЕ того как handler вернул ответ
+    │                   → 500 если запись не удалась (ответ НЕ отдаётся)
+    ▼
+GatewayHandler          → 400 если sanitizer заблокировал (из request.state)
+    │                   → 400 адаптер не найден
     │                   → 502 LLM вернул ошибку
     │                   → 504 LLM timeout
     ▼
-OutputSanitizeMiddleware
-    │
-    ▼
-AuditLogMiddleware      → 500 если запись не удалась
-    │                      ответ LLM НЕ отдаётся клиенту
-    ▼
 HTTP Response
 ```
+
+**Порядок регистрации middleware** в Starlette `add_middleware()` обратный порядку обработки: последний зарегистрированный = самый внешний. Чтобы получить цепочку Auth → Sanitize → Audit → Handler, регистрируем в обратном порядке: сначала Audit, потом Sanitize, потом Auth.
+
+**Почему Audit стоит ПОСЛЕ Sanitize (но оборачивает Handler):**
+
+Два конкурирующих требования:
+1. **Privacy-by-design** — Audit никогда не должен видеть несанитайзированные данные. Если в v3 добавить full request logging, он должен логировать уже очищенный текст.
+2. **Audit blocked-запросов** — blocked запросы (sanitizer заблокировал) тоже должны аудироваться со `status=blocked`.
+
+Наивное решение — поставить Audit снаружи Sanitize — нарушает требование (1). Поставить Audit внутри Sanitize и делать ранний `return` из Sanitize — нарушает требование (2), потому что `return` без `call_next` обрывает всю внутреннюю цепочку и Audit не запускается.
+
+**Решение:** SanitizeMiddleware при блокировке не делает ранний return. Вместо этого он сохраняет ошибку в `request.state.blocked_error` и всё равно вызывает `call_next`. GatewayHandler проверяет флаг первым делом и возвращает 400. Audit запускается как обёртка вокруг Handler и видит только санитайзированные данные.
 
 **Ключевое решение по аудиту:** запись синхронная и блокирующая. Если аудит не записан — клиент получает 500 и ответ LLM не отдаётся. Это compliance-гарантия: факт передачи данных не существует без его записи. Трейдоф: +латентность на каждый запрос (см. ADR-004).
 

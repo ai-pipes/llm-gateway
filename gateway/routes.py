@@ -10,6 +10,10 @@ def create_router(registry: AdapterRegistry) -> APIRouter:
 
     @router.post("/v1/chat/completions")
     async def chat_completions(request: Request):
+        # Check if SanitizeMiddleware blocked the request
+        if hasattr(request.state, "blocked_error"):
+            return JSONResponse(request.state.blocked_error, status_code=400)
+
         body = await request.json()
 
         messages = [

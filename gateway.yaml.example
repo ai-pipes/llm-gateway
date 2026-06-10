@@ -32,8 +32,10 @@ adapters:
   #   module: "my_adapters.corp_llm.CorpLLMAdapter"
 
 sanitizers:
-  # v1: пустые цепочки (pass-through)
-  input: []
+  input:
+    - module: "gateway.sanitizers.pii_regex.PiiRegexSanitizer"
+      config:
+        mode: replace   # replace → [EMAIL]/[PHONE]/[CARD] | block → 400
   output: []
 
 audit:

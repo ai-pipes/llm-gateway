@@ -124,3 +124,61 @@ def test_response_is_openai_compatible(client):
     assert "choices" in data
     assert "usage" in data
     assert data["choices"][0]["message"]["role"] == "assistant"
+
+
+def test_pii_replaced_in_request(audit_capture):
+    """PII в теле запроса заменяется, ответ приходит успешно, аудит содержит replaced:EMAIL."""
+    from gateway.sanitizers.pii_regex import PiiRegexSanitizer
+    from tests.conftest import MockLLMAdapter
+
+    registry = AdapterRegistry()
+    registry.register(MockLLMAdapter(), default=True)
+
+    app = create_app_from_components(
+        auth_provider=StaticKeyAuthProvider({"test-key": {"user_id": "u", "team_id": "t"}}),
+        input_chain=SanitizerChain([PiiRegexSanitizer(mode="replace")]),
+        output_chain=SanitizerChain([]),
+        audit_backend=audit_capture,
+        registry=registry,
+    )
+    c = TestClient(app, raise_server_exceptions=False)
+    response = c.post(
+        "/v1/chat/completions",
+        json={
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "My email is user@example.com, help me."}],
+        },
+        headers={"x-api-key": "test-key"},
+    )
+
+    assert response.status_code == 200
+    record = audit_capture.last()
+    assert record.status == "success"
+    assert "replaced:EMAIL" in record.input_actions
+
+
+def test_create_app_raises_on_bad_sanitizer_module(tmp_path):
+    """create_app() raises ValueError with clear message if sanitizer module is invalid."""
+    import yaml
+    from gateway.app import create_app
+
+    config = {
+        "gateway": {"host": "0.0.0.0", "port": 8080},
+        "auth": {
+            "module": "gateway.middleware.auth.StaticKeyAuthProvider",
+            "config": {"keys": {"sk-test": {"user_id": "u", "team_id": "t"}}},
+        },
+        "adapters": [],
+        "sanitizers": {
+            "input": [
+                {"module": "gateway.sanitizers.nonexistent.FakeSanitizer", "config": {}}
+            ],
+            "output": [],
+        },
+        "audit": {"backend": "stdout"},
+    }
+    config_file = tmp_path / "gateway.yaml"
+    config_file.write_text(yaml.dump(config))
+
+    with pytest.raises(ValueError, match="Cannot load sanitizer"):
+        create_app(str(config_file))

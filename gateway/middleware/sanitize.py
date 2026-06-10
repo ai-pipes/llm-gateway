@@ -34,18 +34,25 @@ class SanitizeMiddleware(BaseHTTPMiddleware):
                     if result.blocked:
                         request.state.input_actions = input_actions
                         request.state.audit_status = "blocked"
-                        return JSONResponse(
-                            {
-                                "error": {
-                                    "type": "invalid_request_error",
-                                    "message": f"Input blocked: {result.block_reason}",
-                                    "code": "sanitizer_blocked",
-                                }
-                            },
-                            status_code=400,
-                        )
+                        # Store blocked error — route handler will return this as 400
+                        # We still call call_next so AuditLogMiddleware (innermost) runs
+                        request.state.blocked_error = {
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": f"Input blocked: {result.block_reason}",
+                                "code": "sanitizer_blocked",
+                            }
+                        }
+                        new_body = json.dumps(data).encode()
 
-            # Reconstruct request with sanitized body
+                        async def receive():
+                            return {"type": "http.request", "body": new_body, "more_body": False}
+
+                        request._receive = receive
+                        response = await call_next(request)
+                        request.state.output_actions = []
+                        return response
+
             new_body = json.dumps(data).encode()
 
             async def receive():
