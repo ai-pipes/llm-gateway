@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from gateway.adapters.base import BaseLLMAdapter
 from gateway.adapters.registry import AdapterRegistry
 from gateway.audit.base import BaseAuditBackend
+from gateway.audit.file_backend import FileAuditBackend
 from gateway.audit.stdout_backend import StdoutAuditBackend
 from gateway.middleware.auth import AuthMiddleware, BaseAuthProvider
 from gateway.middleware.sanitize import SanitizeMiddleware
@@ -65,7 +66,21 @@ def create_app(config_path: str = "gateway.yaml") -> FastAPI:
     output_chain = _load_chain(config.sanitizers.output)
 
     # Audit backend
-    audit_backend = StdoutAuditBackend()
+    match config.audit.type:
+        case "stdout":
+            audit_backend = StdoutAuditBackend()
+        case "file":
+            audit_backend = FileAuditBackend(path=config.audit.path)
+        case "plugin":
+            try:
+                mod_path, cls_name = config.audit.module.rsplit(".", 1)
+                mod = importlib.import_module(mod_path)
+                cls = getattr(mod, cls_name)
+                audit_backend = cls(**config.audit.config)
+            except (ImportError, AttributeError, ValueError, TypeError) as e:
+                raise ValueError(f"Cannot load audit backend '{config.audit.module}': {e}") from e
+        case _:
+            raise ValueError(f"Unknown audit backend type: {config.audit.type!r}")
 
     # Adapter registry
     registry = AdapterRegistry()

@@ -2,6 +2,7 @@ import os
 import pytest
 import textwrap
 from pathlib import Path
+from pydantic import ValidationError
 from gateway.config import load_config, Config
 
 
@@ -33,7 +34,7 @@ def config_file(tmp_path):
           output: []
 
         audit:
-          backend: "stdout"
+          type: stdout
     """)
     p = tmp_path / "gateway.yaml"
     p.write_text(content)
@@ -82,7 +83,7 @@ def test_load_config_env_interpolation(tmp_path, monkeypatch):
           input: []
           output: []
         audit:
-          backend: "stdout"
+          type: stdout
     """)
     p = tmp_path / "gateway.yaml"
     p.write_text(content)
@@ -109,9 +110,43 @@ def test_load_config_missing_env_var_raises(tmp_path):
           input: []
           output: []
         audit:
-          backend: "stdout"
+          type: stdout
     """)
     p = tmp_path / "gateway.yaml"
     p.write_text(content)
     with pytest.raises(ValueError, match="MISSING_VAR"):
         load_config(str(p))
+
+
+def test_file_audit_config_requires_path(tmp_path):
+    content = textwrap.dedent("""
+        auth:
+          module: "gateway.middleware.auth.StaticKeyAuthProvider"
+          config: {}
+        adapters: []
+        sanitizers:
+          input: []
+          output: []
+        audit:
+          type: file
+    """)
+    p = tmp_path / "gateway.yaml"
+    p.write_text(content)
+    with pytest.raises(ValidationError):
+        load_config(str(p))
+
+
+def test_stdout_audit_config_default(tmp_path):
+    content = textwrap.dedent("""
+        auth:
+          module: "gateway.middleware.auth.StaticKeyAuthProvider"
+          config: {}
+        adapters: []
+        sanitizers:
+          input: []
+          output: []
+    """)
+    p = tmp_path / "gateway.yaml"
+    p.write_text(content)
+    config = load_config(str(p))
+    assert config.audit.type == "stdout"

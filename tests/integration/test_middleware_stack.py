@@ -1,4 +1,5 @@
 import pytest
+from pathlib import Path
 from gateway.sanitizers.base import BaseSanitizer, SanitizerChain, SanitizeResult
 from gateway.adapters.registry import AdapterRegistry
 from gateway.app import create_app_from_components
@@ -175,10 +176,80 @@ def test_create_app_raises_on_bad_sanitizer_module(tmp_path):
             ],
             "output": [],
         },
-        "audit": {"backend": "stdout"},
+        "audit": {"type": "stdout"},
     }
     config_file = tmp_path / "gateway.yaml"
     config_file.write_text(yaml.dump(config))
 
     with pytest.raises(ValueError, match="Cannot load sanitizer"):
         create_app(str(config_file))
+
+
+def test_audit_writes_to_file(tmp_path):
+    """Full stack request with FileAuditBackend — JSON line appears in the file."""
+    import json
+    from gateway.audit.file_backend import FileAuditBackend
+
+    audit_path = str(tmp_path / "audit.jsonl")
+    backend = FileAuditBackend(path=audit_path)
+
+    from tests.conftest import MockLLMAdapter
+    registry = AdapterRegistry()
+    registry.register(MockLLMAdapter(), default=True)
+
+    app = create_app_from_components(
+        auth_provider=StaticKeyAuthProvider({"test-key": {"user_id": "u", "team_id": "t"}}),
+        input_chain=SanitizerChain([]),
+        output_chain=SanitizerChain([]),
+        audit_backend=backend,
+        registry=registry,
+    )
+    c = TestClient(app, raise_server_exceptions=False)
+    response = c.post(
+        "/v1/chat/completions",
+        json=VALID_REQUEST,
+        headers={"x-api-key": "test-key"},
+    )
+    assert response.status_code == 200
+
+    lines = Path(audit_path).read_text().strip().split("\n")
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["status"] == "success"
+    assert record["user_id"] == "u"
+
+
+def test_create_app_wires_file_audit_backend(tmp_path, monkeypatch):
+    """create_app() correctly wires FileAuditBackend when config has type: file."""
+    import json
+    import yaml
+    from gateway.app import create_app
+
+    audit_path = str(tmp_path / "audit.jsonl")
+    config = {
+        "gateway": {"host": "0.0.0.0", "port": 8080},
+        "auth": {
+            "module": "gateway.middleware.auth.StaticKeyAuthProvider",
+            "config": {"keys": {"sk-test": {"user_id": "u", "team_id": "t"}}},
+        },
+        "adapters": [],
+        "sanitizers": {"input": [], "output": []},
+        "audit": {"type": "file", "path": audit_path},
+    }
+    config_file = tmp_path / "gateway.yaml"
+    config_file.write_text(yaml.dump(config))
+
+    app = create_app(str(config_file))
+    from fastapi.testclient import TestClient
+    c = TestClient(app, raise_server_exceptions=False)
+    response = c.post(
+        "/v1/chat/completions",
+        json=VALID_REQUEST,
+        headers={"x-api-key": "sk-test"},
+    )
+    assert response.status_code == 400  # no adapter registered → 400
+
+    lines = Path(audit_path).read_text().strip().split("\n")
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["user_id"] == "u"

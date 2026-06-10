@@ -1,7 +1,7 @@
 import os
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 import yaml
 from pydantic import BaseModel, Field, model_validator
 
@@ -57,8 +57,25 @@ class SanitizersConfig(BaseModel):
     output: list[SanitizerItemConfig] = []
 
 
-class AuditConfig(BaseModel):
-    backend: Literal["stdout"] = "stdout"
+class StdoutAuditConfig(BaseModel):
+    type: Literal["stdout"] = "stdout"
+
+
+class FileAuditConfig(BaseModel):
+    type: Literal["file"]
+    path: str = Field(min_length=1)
+
+
+class PluginAuditConfig(BaseModel):
+    type: Literal["plugin"]
+    module: str
+    config: dict = Field(default_factory=dict)
+
+
+AuditConfig = Annotated[
+    StdoutAuditConfig | FileAuditConfig | PluginAuditConfig,
+    Field(discriminator="type")
+]
 
 
 class Config(BaseModel):
@@ -66,7 +83,7 @@ class Config(BaseModel):
     auth: AuthConfig
     adapters: list[OpenAICompatibleAdapterConfig | PluginAdapterConfig] = []
     sanitizers: SanitizersConfig = SanitizersConfig()
-    audit: AuditConfig = AuditConfig()
+    audit: AuditConfig = StdoutAuditConfig()
 
     @model_validator(mode="after")
     def check_single_default_adapter(self) -> "Config":

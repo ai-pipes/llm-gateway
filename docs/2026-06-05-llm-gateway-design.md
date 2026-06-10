@@ -235,7 +235,7 @@ sanitizers:
   output: []
 
 audit:
-  backend: "stdout"
+  type: stdout   # stdout | file | plugin
 ```
 
 ---
@@ -289,7 +289,8 @@ llm-gateway/
 │   └── audit/
 │       ├── record.py               # AuditRecord dataclass
 │       ├── base.py                 # BaseAuditBackend
-│       └── stdout_backend.py       # reference implementation
+│       ├── stdout_backend.py       # reference implementation
+│       └── file_backend.py         # file backend (v2.2)
 ├── examples/
 │   └── custom_adapter.py           # шаблон для пользователя
 ├── docs/

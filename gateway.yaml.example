@@ -39,4 +39,17 @@ sanitizers:
   output: []
 
 audit:
-  backend: "stdout"   # JSON lines → stdout → ELK/Splunk/etc
+  type: stdout   # JSON lines → stdout → ELK/Splunk/etc
+
+# File backend — writes JSON lines to a local file:
+# audit:
+#   type: file
+#   path: "/var/log/gateway/audit.jsonl"
+
+# Plugin backend — custom backend (Python class):
+# audit:
+#   type: plugin
+#   module: "my_backends.corp_audit.CorpAuditBackend"
+#   config:
+#     endpoint: "https://audit.corp.internal"
+#     token_env: AUDIT_TOKEN
