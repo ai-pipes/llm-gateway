@@ -23,26 +23,20 @@ curl http://localhost:8080/v1/chat/completions \
 
 ## Architecture
 
+[![Architecture diagram](docs/architecture-preview.png)](docs/architecture.html)
+
+> Open `docs/architecture.html` for the full interactive version with all request flows.
+
+Four layers — dependencies flow downward only:
+
 ```
-HTTP Request
-    │
-    ▼
-AuthMiddleware          → 401 if auth fails (no audit written)
-    │
-    ▼
-AuditLogMiddleware      → wraps the rest; writes audit on every response
-    │
-    ▼
-SanitizeMiddleware      → 400 if input blocked (audit written with status=blocked)
-    │
-    ▼
-Route Handler           → calls LLM adapter
-    │
-    ▼
-HTTP Response
+api/openai/        →  routes.py: StreamingResponse or JSONResponse
+application/       →  ChatService: sanitize → adapter → audit (in finally)
+domain/            →  BaseLLMAdapter, BaseSanitizer, BaseAuditBackend, models
+infrastructure/    →  OpenAICompatibleAdapter, PresidioSanitizer, StdoutAuditBackend, …
 ```
 
-**Compliance guarantee:** If audit write fails, client receives 500 — the LLM response is NOT returned. No response without a record.
+`AuthMiddleware` is the only middleware — everything else lives in `ChatService`. Audit is written unconditionally via `finally`, covering success, error, and client disconnect (`status="cancelled"`).
 
 ## Extension Points
 
@@ -75,12 +69,11 @@ adapters:
     default: true
 ```
 
-(This section already has `default: true` ✓)
-
 ### Custom Auth Provider
 
 ```python
-from gateway.middleware.auth import BaseAuthProvider, AuthContext
+from gateway.infrastructure.auth.base import BaseAuthProvider
+from gateway.domain.models import AuthContext
 
 class JWTAuthProvider(BaseAuthProvider):
     async def authenticate(self, request) -> AuthContext | None:
@@ -104,7 +97,7 @@ auth:
 ### Custom Sanitizer
 
 ```python
-from gateway.sanitizers.base import BaseSanitizer, SanitizeResult
+from gateway.domain.sanitizers.base import BaseSanitizer, SanitizeResult
 
 class PiiSanitizer(BaseSanitizer):
     async def sanitize(self, text: str) -> SanitizeResult:
@@ -121,8 +114,6 @@ sanitizers:
     - module: "my_sanitizers.pii.PiiSanitizer"
   output: []
 ```
-
-> **Note (v1):** The sanitizers config section is not yet wired in v1. Input/output chains are always empty in the current release. This will be implemented in v2.
 
 ## Development
 
@@ -163,17 +154,6 @@ Every authenticated request generates an audit record (JSON to stdout → pipe t
 ```
 
 Note: prompt and response content are **never** stored in the audit record.
-
-## Roadmap
-
-| Version | Feature |
-|---------|---------|
-| v2 | PII regex sanitizer (email, phone, card) |
-| v2 | PostgreSQL + file audit backends |
-| v2 | Prometheus metrics endpoint |
-| v3 | Anthropic Messages API (`/v1/messages`) for Claude Code proxy |
-| v3 | Rate limiting per key / team |
-| v3 | Full request/response logging (opt-in) |
 
 ## License
 

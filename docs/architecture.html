@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <title>LLM Gateway — Architecture</title>
+  <title>LLM Gateway — Architecture v3.1</title>
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.6/dist/mermaid.min.js" integrity="sha384-qX9VvWkP79m/O121ZE6sOYp0nf/pldQgtvWDbkpzi+3mUo4Wn4Ix4cFzNPay3VaB" crossorigin="anonymous"></script>
   <style>
     body {
@@ -11,6 +11,7 @@
       color: #e2e8f0;
       margin: 0;
       padding: 32px;
+      max-width: 1100px;
     }
     h1 { color: #f8fafc; font-size: 1.4rem; margin-bottom: 4px; }
     h2 { color: #94a3b8; font-size: 1rem; font-weight: 500; margin: 40px 0 8px; }
@@ -28,8 +29,6 @@
       overflow-x: auto;
     }
     .mermaid svg { max-width: 100%; }
-
-    /* highlight problem zones */
     .badge {
       display: inline-block;
       font-size: 0.72rem;
@@ -38,109 +37,224 @@
       margin-left: 8px;
       vertical-align: middle;
     }
-    .badge-warn  { background: #7c3d00; color: #fbbf24; }
     .badge-ok    { background: #14532d; color: #4ade80; }
+    .badge-info  { background: #1e3a5f; color: #93c5fd; }
+    .badge-warn  { background: #7c3d00; color: #fbbf24; }
+    .version {
+      color: #475569;
+      font-size: 0.8rem;
+      margin-top: 2px;
+      margin-bottom: 40px;
+    }
   </style>
 </head>
 <body>
   <h1>LLM Gateway — Request Flow</h1>
+  <p class="version">v3.1 · 2026-06-10 · layered architecture + SSE streaming</p>
 
-  <h2>1. Текущий стек (v2.2) <span class="badge badge-ok">as-is</span></h2>
-  <p class="note">Порядок обработки: Auth → Sanitize → Audit → Handler. Регистрация в app.py — обратная.</p>
+  <!-- ── 1. Layer Map ── -->
+  <h2>1. Архитектура слоёв <span class="badge badge-ok">v3.1</span></h2>
+  <p class="note">Зависимости направлены только вниз. Domain не знает об Infrastructure.</p>
+  <div class="diagram-card">
+    <div class="mermaid">
+flowchart TB
+    subgraph api["api/openai/"]
+        R["routes.py\n─ POST /v1/chat/completions\n─ _sse_stream() generator"]
+    end
+    subgraph app["application/"]
+        CS["chat_service.py\n─ complete()\n─ complete_stream()\n─ _sanitize_input()\n─ _resolve_adapter()"]
+    end
+    subgraph domain["domain/"]
+        M["models.py\nChatRequest · ChatResponse\nAuditRecord · AuthContext"]
+        AB["adapters/base.py\nBaseLLMAdapter\n─ chat()\n─ stream_chat()"]
+        SB["sanitizers/base.py\nBaseSanitizer · SanitizerChain"]
+        AUB["audit/base.py\nBaseAuditBackend"]
+        EX["exceptions.py\nSanitizerBlockedError\nAdapterNotFoundError\nUpstreamTimeoutError\nUpstreamError"]
+    end
+    subgraph infra["infrastructure/"]
+        OAI["adapters/openai_compatible.py\nOpenAICompatibleAdapter\n─ chat()  ─ stream_chat()\n─ _build_payload()"]
+        PIR["sanitizers/pii_regex.py\nPiiRegexSanitizer"]
+        PRE["sanitizers/presidio_sanitizer.py\nPresidioSanitizer"]
+        STD["audit/stdout_backend.py\nStdoutAuditBackend"]
+        FILE["audit/file_backend.py\nFileAuditBackend"]
+        AUTH["auth/static_key.py\nStaticKeyAuthProvider\nAuthMiddleware"]
+        REG["adapters/registry.py\nAdapterRegistry"]
+    end
+
+    R --> CS
+    CS --> AB
+    CS --> SB
+    CS --> AUB
+    CS --> EX
+    AB --> M
+    OAI --> AB
+    PIR --> SB
+    PRE --> SB
+    STD --> AUB
+    FILE --> AUB
+    AUTH --> domain
+
+    style api  fill:#1a2035,stroke:#3b82f6
+    style app  fill:#1a2a1a,stroke:#22c55e
+    style domain fill:#2a1a2a,stroke:#a855f7
+    style infra fill:#2a1f0a,stroke:#f59e0b
+    </div>
+  </div>
+
+  <!-- ── 2. Non-streaming ── -->
+  <h2>2. Non-streaming flow <span class="badge badge-ok">complete()</span></h2>
+  <p class="note">
+    Auth в middleware — единственный middleware. Sanitize и audit — внутри ChatService.
+    Blocked запросы аудируются до raise.
+  </p>
   <div class="diagram-card">
     <div class="mermaid">
 sequenceDiagram
     participant C as Client
     participant AM as AuthMiddleware
-    participant SM as SanitizeMiddleware
-    participant AL as AuditLogMiddleware
-    participant H as GatewayHandler
-    participant LLM as LLM Adapter
+    participant R as routes.py
+    participant CS as ChatService
+    participant SAN as SanitizerChain
+    participant AD as Adapter
+    participant AUD as AuditBackend
 
-    C->>AM: POST /v1/chat/completions
-    Note over AM: authenticate(request)<br/>→ AuthContext | 401
-    AM->>SM: + state.auth
+    C->>AM: POST /v1/chat/completions\n{"messages":[...], "model":"..."}
+    Note over AM: static_key.py\nvalidates x-api-key header\n→ AuthContext | 401
+    AM->>R: request.state.auth
 
-    Note over SM: читает body bytes<br/>санитайзит messages<br/>state.input_actions<br/>state.audit_status<br/>переписывает _receive
-    SM->>AL: sanitized request
+    R->>CS: complete(raw_messages, model, auth, request_id)
 
-    Note over AL: state.request_id<br/>запоминает start_time
-    AL->>H: call_next
+    CS->>SAN: _sanitize_input()\nruns input chain per message
+    alt blocked
+        SAN-->>CS: blocked=True
+        CS->>AUD: write(status="blocked")
+        CS-->>R: raise SanitizerBlockedError
+        R-->>C: 400 {"error": {"code": "sanitizer_blocked"}}
+    end
+    SAN-->>CS: sanitized_messages, input_actions
 
-    Note over H: body → ChatRequest<br/>adapter.chat()<br/>state.model<br/>state.prompt_tokens<br/>state.completion_tokens
-    H->>LLM: ChatRequest
-    LLM-->>H: ChatResponse
+    CS->>AD: _resolve_adapter() → registry.get(name)
+    alt not found
+        CS->>AUD: write(status="error", error="adapter_not_found")
+        CS-->>R: raise AdapterNotFoundError
+        R-->>C: 400 {"error": {"code": "adapter_not_found"}}
+    end
 
-    H-->>AL: JSONResponse
-    Note over AL: собирает AuditRecord<br/>из request.state<br/>пишет в backend → 500 если fail
-    AL-->>SM: response
+    CS->>AD: adapter.chat(ChatRequest)
+    AD-->>CS: ChatResponse(content, model, usage)
 
-    Note over SM: output sanitize (no-op)<br/>state.output_actions = []
-    SM-->>AM: response
-    AM-->>C: response
+    CS->>AUD: write(status="success"\nprompt_tokens, completion_tokens\nmessages+completion если log_body=True)
+    CS-->>R: ChatResponse
+
+    R-->>C: 200 {"choices":[{"message":{"content":"..."}}], "usage":{...}}
     </div>
   </div>
 
-  <h2>2. Что есть в <code>request.state</code> к моменту записи аудита</h2>
-  <p class="note">AuditLogMiddleware читает state после call_next. Жёлтым — чего сейчас нет, но нужно для body logging.</p>
-  <div class="diagram-card">
-    <div class="mermaid">
-flowchart LR
-    subgraph state["request.state к моменту AuditLogMiddleware.write()"]
-        direction TB
-        A1["✅ auth (key_id, user_id, team_id)"]
-        A2["✅ request_id"]
-        A3["✅ adapter_name"]
-        A4["✅ model"]
-        A5["✅ prompt_tokens"]
-        A6["✅ completion_tokens"]
-        A7["✅ input_actions"]
-        A8["✅ output_actions"]
-        A9["✅ audit_status"]
-        A10["✅ audit_error"]
-        B1["⚠️ sanitized_messages — нет"]
-        B2["⚠️ completion_text — нет"]
-    end
-
-    subgraph owner["Кто должен это положить"]
-        direction TB
-        O1["SanitizeMiddleware → sanitized_messages"]
-        O2["GatewayHandler → completion_text"]
-    end
-
-    B1 -.->|нужно добавить| O1
-    B2 -.->|нужно добавить| O2
-
-    style B1 fill:#7c3d00,stroke:#f59e0b,color:#fbbf24
-    style B2 fill:#7c3d00,stroke:#f59e0b,color:#fbbf24
-    style O1 fill:#1e3a5f,stroke:#3b82f6,color:#93c5fd
-    style O2 fill:#1e3a5f,stroke:#3b82f6,color:#93c5fd
-    </div>
-  </div>
-
-  <h2>3. Проблема: output sanitization gap <span class="badge badge-warn">нюанс</span></h2>
+  <!-- ── 3. Streaming ── -->
+  <h2>3. Streaming flow <span class="badge badge-info">complete_stream()</span></h2>
   <p class="note">
-    completion_text кладётся в state в Handler — до того, как SanitizeMiddleware сделает output sanitize.
-    Сейчас это no-op, но архитектурно: лог будет содержать НЕсанитайзированный ответ, если output sanitize когда-либо заработает.
+    Токены идут клиенту сразу — настоящий TTFF. Output sanitizer убран из клиентского пути;
+    запускается постфактум на полном тексте только для audit body logging.
+    Audit гарантирован через <code>finally</code> — при успехе, ошибке и дисконнекте.
   </p>
   <div class="diagram-card">
     <div class="mermaid">
 sequenceDiagram
-    participant H as GatewayHandler
-    participant AL as AuditLogMiddleware
-    participant SM as SanitizeMiddleware
+    participant C as Client
+    participant AM as AuthMiddleware
+    participant R as routes.py _sse_stream()
+    participant CS as ChatService
+    participant SAN as SanitizerChain
+    participant AD as Adapter stream_chat()
+    participant LLM as Upstream LLM
+    participant AUD as AuditBackend
 
-    H->>H: state.completion_text = response.content
-    H-->>AL: JSONResponse
-    Note over AL: читает state.completion_text ✅<br/>(но это ДО output sanitize)
-    AL-->>SM: response
-    Note over SM: output sanitize здесь<br/>state.completion_text уже в логе ⚠️
+    C->>AM: POST /v1/chat/completions\n{"messages":[...], "stream": true}
+    AM->>R: AuthContext
+
+    R->>CS: complete_stream(...) [async generator]
+
+    Note over CS: _sanitize_input() — sync, before first yield
+    CS->>SAN: input chain per message
+    alt blocked
+        CS->>AUD: write(status="blocked")
+        CS-->>R: raise SanitizerBlockedError
+        R->>C: 200 SSE: data:{"error":{"code":"sanitizer_blocked"}}\n\ndata:[DONE]\n\n
+    end
+
+    Note over CS: _resolve_adapter() — before first yield
+    alt not found
+        CS->>AUD: write(status="error")
+        CS-->>R: raise AdapterNotFoundError
+        R->>C: 200 SSE: data:{"error":{"code":"adapter_not_found"}}\n\ndata:[DONE]\n\n
+    end
+
+    Note over R: StreamingResponse committed\nHTTP 200 headers sent
+
+    CS->>AD: adapter.stream_chat(request, usage_out={})
+    AD->>LLM: POST /chat/completions (stream=true\nstream_options.include_usage=true)
+
+    loop SSE lines from LLM
+        LLM-->>AD: data: {"choices":[{"delta":{"content":"токен"}}]}
+        AD-->>CS: yield "токен"
+        CS-->>R: yield "токен"   [+ append to buffer]
+        R-->>C: data: {"id":"chatcmpl-...","choices":[{"delta":{"content":"токен"}}]}\n\n
+    end
+
+    LLM-->>AD: data: [DONE]
+    Note over AD: stream_done=True, продолжаем итерировать
+    LLM-->>AD: data: {"usage":{"prompt_tokens":N,...}}
+    Note over AD: usage_out.update(usage)
+
+    Note over CS: stream_complete = True
+    R-->>C: data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n
+
+    Note over CS,AUD: finally block — выполняется всегда
+    CS->>SAN: output chain на "".join(buffer)\n(только если log_body=True)
+    CS->>AUD: write(status="success"\nprompt_tokens, completion_tokens)
+
+    R-->>C: data: [DONE]\n\n
+
+    alt client disconnects mid-stream
+        Note over CS: GeneratorExit → finally\nstream_complete=False → status="cancelled"
+        CS->>AUD: write(status="cancelled")
+    end
     </div>
   </div>
 
-  <h2>4. Предлагаемое решение: два новых поля в <code>AuditRecord</code></h2>
+  <!-- ── 4. SSE format ── -->
+  <h2>4. SSE wire format <span class="badge badge-info">OpenAI-compatible</span></h2>
   <p class="note">
-    Оба поля — <code>None</code> по умолчанию. Заполняются только если <code>audit.body_logging.enabled: true</code>.
+    Каждый чанк — одна строка <code>data: {...}\n\n</code>. Ошибки и успешные чанки — один и тот же формат потока.
+    <code>data: [DONE]</code> гарантирован через <code>finally</code> — даже при ошибке.
+  </p>
+  <div class="diagram-card">
+    <div class="mermaid">
+sequenceDiagram
+    participant S as _sse_stream()
+    participant C as Client
+
+    Note over S,C: content chunks (N штук)
+    S-->>C: data: {"id":"chatcmpl-{id}","object":"chat.completion.chunk",<br/>"model":"gpt-4o","choices":[{"index":0,<br/>"delta":{"content":"Привет"},"finish_reason":null}]}\n\n
+
+    Note over S,C: финальный stop chunk
+    S-->>C: data: {"id":"chatcmpl-{id}","object":"chat.completion.chunk",<br/>"model":"gpt-4o","choices":[{"index":0,<br/>"delta":{},"finish_reason":"stop"}]}\n\n
+
+    Note over S,C: терминатор — всегда последним
+    S-->>C: data: [DONE]\n\n
+
+    Note over S,C: если ошибка — error event перед [DONE]
+    S-->>C: data: {"error":{"type":"gateway_error",<br/>"code":"upstream_timeout",<br/>"message":"LLM request timed out"}}\n\n
+    S-->>C: data: [DONE]\n\n
+    </div>
+  </div>
+
+  <!-- ── 5. AuditRecord ── -->
+  <h2>5. AuditRecord <span class="badge badge-ok">v3.0+</span></h2>
+  <p class="note">
+    <code>messages</code> и <code>completion</code> — <code>None</code> по умолчанию.
+    Заполняются только при <code>audit.body_logging.enabled: true</code>.
+    При streaming <code>completion</code> — output-sanitized полный текст из буфера.
   </p>
   <div class="diagram-card">
     <div class="mermaid">
@@ -149,8 +263,8 @@ classDiagram
         +str request_id
         +datetime timestamp
         +str api_key_id
-        +str|None user_id
-        +str|None team_id
+        +str user_id
+        +str team_id
         +str adapter
         +str model
         +int prompt_tokens
@@ -159,25 +273,73 @@ classDiagram
         +list~str~ input_actions
         +list~str~ output_actions
         +str status
-        +str|None error
-        +list~dict~|None messages
-        +str|None completion
+        +str error
+        +list~str~ messages
+        +str completion
     }
 
-    class AuditConfig {
-        &lt;&lt;discriminated union&gt;&gt;
-        type: stdout | file | plugin
-        body_logging: BodyLoggingConfig | None
+    class AuditStatus {
+        &lt;&lt;enumeration&gt;&gt;
+        success
+        blocked
+        cancelled
+        error
+    }
+
+    class StdoutAuditBackend {
+        +write(record)
+    }
+
+    class FileAuditBackend {
+        +str path
+        +write(record)
     }
 
     class BodyLoggingConfig {
         +bool enabled
     }
 
-    AuditConfig --> BodyLoggingConfig
-    AuditConfig --> AuditRecord : writes
+    AuditRecord --> AuditStatus
+    StdoutAuditBackend --> AuditRecord : writes
+    FileAuditBackend --> AuditRecord : writes
+    StdoutAuditBackend --> BodyLoggingConfig
+    FileAuditBackend --> BodyLoggingConfig
     </div>
   </div>
+
+  <!-- ── 6. Auth ── -->
+  <h2>6. Auth flow <span class="badge badge-ok">middleware</span></h2>
+  <p class="note">
+    Единственный middleware. 401 возвращает до ChatService — не аудируется.
+    Header: <code>x-api-key</code> (не <code>Authorization: Bearer</code>).
+  </p>
+  <div class="diagram-card">
+    <div class="mermaid">
+flowchart LR
+    subgraph config["gateway.yaml"]
+        K["keys:\n  - id: dev\n    key: sk-dev\n    adapter: openai\n    user_id: dev-user"]
+    end
+    subgraph middleware["AuthMiddleware"]
+        direction TB
+        E1["extract x-api-key header"]
+        E2["StaticKeyAuthProvider.authenticate()"]
+        E3["→ AuthContext(key_id, user_id, team_id, adapter_name)"]
+        E4["request.state.auth = ctx"]
+        E1 --> E2 --> E3 --> E4
+    end
+    subgraph fail["401 path"]
+        F1["HTTPException(401)\nno audit written"]
+    end
+
+    config --> middleware
+    middleware -->|key not found| fail
+    middleware -->|ok| R["routes.py\nrequest.state.auth"]
+
+    style fail fill:#3b0a0a,stroke:#ef4444
+    style middleware fill:#1e2330,stroke:#3b82f6
+    </div>
+  </div>
+
 </body>
 <script>
   mermaid.initialize({ startOnLoad: true, theme: "dark" });

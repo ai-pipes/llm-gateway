@@ -2,3 +2,6 @@
 .superpowers
 docs/superpowers
 .worktrees
+__pycache__/
+*.pyc
+*.pyo
