@@ -8,10 +8,6 @@ version = "0.1.0"
 description = "Corporate LLM Gateway — OpenAI-compatible proxy with audit trail, sanitization, and pluggable adapters"
 readme = "README.md"
 license = "MIT"
-
-[project.urls]
-Homepage = "https://github.com/ai-pipes/llm-gateway"
-Source = "https://github.com/ai-pipes/llm-gateway"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.111.0",
@@ -20,6 +16,10 @@ dependencies = [
     "pyyaml>=6.0.1",
     "httpx>=0.27.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/ai-pipes/llm-gateway"
+Source = "https://github.com/ai-pipes/llm-gateway"
 
 [project.optional-dependencies]
 dev = [
