@@ -4,6 +4,88 @@ A chronological development journal. This is where the thought process, dead end
 
 ---
 
+## v3.3 — Streaming PII Restoration (2026-06-12)
+
+**No breaking changes.** `complete_stream()` now restores PII with true TTFF — max hold-back is the length of the longest registered placeholder (~26 chars).
+
+### The problem with streaming
+
+`[EMAIL_ADDRESS_3f2a1b0c]` is 26 characters. The LLM tokenizer splits text at arbitrary boundaries — a placeholder may arrive as `[EMAIL`, `_ADDRESS_`, `3f2a`, `1b0c]` across four separate SSE chunks. A naive `str.replace()` on each chunk misses cross-chunk matches.
+
+The obvious fix — buffer the entire response, restore, then re-stream — trades the real TTFF for a fake one. The client still waits for the full response before receiving the first token.
+
+### Why a look-ahead buffer is the right shape
+
+The structure of placeholders is known in advance: they start with `[` and end with `]`. Only bytes starting from `[` need to be held. Everything before `[` can be forwarded immediately.
+
+This is essentially a streaming string search: hold just enough state to match or reject, then release. The maximum hold-back is bounded by the longest placeholder, which in practice is always under 30 characters.
+
+### Implementation: `StreamingRestorer._probe()`
+
+The key insight is that we know the exact set of strings we're looking for (the registered placeholders). Instead of a general automaton, we just do prefix matching against the known set:
+
+1. Does the buffer start with a complete registered placeholder? → restore and release.
+2. Is the buffer a valid prefix of any registered placeholder? → wait.
+3. Neither? → flush `[` and keep going.
+
+The `any(p.startswith(buf) for p in self._map)` call in step 2 does a linear scan across all registered placeholders. For the typical case of 1–10 placeholders per request, this is negligible. A trie would save a constant factor; it is not worth the complexity.
+
+### Audit in streaming
+
+The raw (placeholder) chunks go into `chunks[]` for audit body logging. The restorer transforms only what is yielded to the client. This mirrors the non-streaming audit design: audit sees placeholders, client sees originals.
+
+### `finalize()` for stream end
+
+When the stream ends, the buffer might still hold a partial placeholder prefix (e.g., `[EMAIL_ADDR` if the stream was cut short). `finalize()` flushes it as-is. This is safer than swallowing it: the client sees the partial token and knows something is incomplete, rather than silently losing characters.
+
+---
+
+## v3.2 — PII Restoration (2026-06-12)
+
+**No breaking changes.** Backward-compatible: `context` parameter defaults to `None`, existing sanitizers unchanged.
+
+### What was done
+
+Added `RestorationContext` — a per-request object that tracks `placeholder → original` mappings. When the input sanitizer replaces PII, it now registers each replacement in the context. After the LLM responds, the gateway restores the original values in the response content before returning it to the client. The client sends a real email and gets a real email back — the LLM only ever sees the placeholder.
+
+Only `complete()` (non-streaming). Streaming restoration is a separate future task.
+
+### The approach: why a context object
+
+The alternative was to store the mapping in `request.state`. We rejected it for the same reason the sanitizer chain was decoupled from the HTTP layer: `request.state` mixes HTTP and application concerns, makes the chat service harder to test in isolation, and binds the mapping to FastAPI's lifecycle. A `RestorationContext` created at the top of `complete()` has an obvious scope, passes cleanly through the sanitizer chain, and is trivially unit-testable.
+
+### Audit security
+
+The audit record stores the **sanitized** (placeholder) version of the LLM response, not the restored version. The sequence matters:
+
+```python
+sanitized_content = response.content              # capture before restore
+response = replace(response, content=ctx.restore(response.content))
+await audit.write(..., completion=sanitized_content)   # placeholder, not PII
+```
+
+If the order were reversed, the audit would log raw PII — defeating the point.
+
+### Two bugs found during live testing
+
+**1. LLM copies the example placeholder literally**
+
+The system instruction said: *"tokens like [EMAIL_a3f7c2b1]"*. gpt-4o-mini saw this and wrote `[EMAIL_a3f7c2b1]` directly into the letter signature — as if it were a generic template variable. The LLM did not use the registered placeholder at all.
+
+The fix: replace the concrete-looking example with one that is obviously not a real value: `[EMAIL_ADDRESS_3f2a1b0c]`, plus the note *"These are NOT real values — do not invent, guess, or reconstruct the originals."* The test case had to be more specific too: the example placeholder and the system instruction together must not suggest to the model that it should invent similar tokens.
+
+Lesson: anything in the system prompt that looks like a template variable *will* be treated as one by the model.
+
+**2. Overlapping Presidio spans corrupt the replacement**
+
+Presidio detected `sarah@techcorp.io` as both `EMAIL_ADDRESS` (positions 29–46, score 1.0) and as `URL` for `techcorp.io` (positions 35–46, score 0.5). Right-to-left replacement processed `URL` first (higher start index), inserted `[URL_xxxxxxxx]`, then tried to replace `EMAIL_ADDRESS` at the original indices — producing `[EMAIL_ADDRESS_xxxxxxxx]a1]`.
+
+The fix: `_resolve_conflicts()` removes overlapping spans before replacement, keeping the highest-confidence span per conflict. This mirrors what `AnonymizerEngine.anonymize()` does internally but in the context-aware path we bypass `anonymize()` entirely.
+
+The bug would not have appeared with the standard (no-context) path because `AnonymizerEngine` handles conflicts internally. The custom right-to-left loop had to replicate that logic explicitly.
+
+---
+
 ## v3.1 — SSE Streaming (2026-06-10)
 
 **No breaking changes.** Fully backward-compatible: requests without `"stream": true` follow the old path unchanged.
