@@ -12,7 +12,8 @@ Steps to use:
 """
 import os
 import httpx
-from gateway.adapters.base import BaseLLMAdapter, ChatRequest, ChatResponse
+from gateway.domain.adapters.base import BaseLLMAdapter
+from gateway.domain.models import ChatRequest, ChatResponse
 
 
 class MyLLMAdapter(BaseLLMAdapter):

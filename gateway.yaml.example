@@ -1,41 +1,49 @@
-# gateway.yaml.example — скопируй в gateway.yaml и заполни своими значениями
+# gateway.yaml.example — copy to gateway.yaml and fill in your values
 
 gateway:
   host: "0.0.0.0"
   port: 8080
 
-# Auth: укажи свою реализацию BaseAuthProvider
-# StaticKeyAuthProvider — только для быстрого старта, не для production
+# Auth: provide your own BaseAuthProvider implementation
+# StaticKeyAuthProvider is for quick-start and tests only — not for production
 auth:
   module: "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider"
   config:
     keys:
-      # Используй переменную окружения вместо хардкода ключа:
+      # Use an environment variable instead of hardcoding the key:
       # "${GATEWAY_KEY_DEV}":
       "sk-change-me":
         user_id: "dev"
         team_id: "engineering"
 
-# Адаптеры: один обязательный default
+# Adapters: at least one must be marked as default
 adapters:
-  # Вариант 1: любой OpenAI-compatible endpoint (нет кода, только конфиг)
+  # Option 1: any OpenAI-compatible endpoint (no code needed, config only)
   - name: openai
     type: openai_compatible
     base_url: "https://api.openai.com/v1"
     auth:
-      token_env: OPENAI_API_KEY   # читается из переменной окружения
+      token_env: OPENAI_API_KEY   # read from environment variable
     default: true
 
-  # Вариант 2: свой адаптер (Python-класс)
+  # Option 2: custom adapter (Python class)
   # - name: corp-llm
   #   type: plugin
   #   module: "my_adapters.corp_llm.CorpLLMAdapter"
 
 sanitizers:
   input:
-    - module: "gateway.sanitizers.pii_regex.PiiRegexSanitizer"
+    # Option A: NLP-based PII detection via spaCy + Microsoft Presidio
+    # Requires: pip install -e ".[presidio]" && python -m spacy download en_core_web_lg
+    - module: "gateway.infrastructure.sanitizers.presidio_sanitizer.PresidioSanitizer"
       config:
-        mode: replace   # replace → [EMAIL]/[PHONE]/[CARD] | block → 400
+        language: en
+
+    # Option B: regex-based PII detection — no extra dependencies
+    # - module: "gateway.infrastructure.sanitizers.pii_regex.PiiRegexSanitizer"
+    #   config:
+    #     mode: replace   # replace → [EMAIL]/[PHONE]/[CARD] | block → 400
+
   output: []
 
 audit:

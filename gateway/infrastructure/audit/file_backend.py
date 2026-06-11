@@ -15,3 +15,10 @@ class FileAuditBackend(BaseAuditBackend):
         data["timestamp"] = record.timestamp.isoformat()
         self._file.write(json.dumps(data) + "\n")
         self._file.flush()
+
+    def close(self) -> None:
+        if not self._file.closed:
+            self._file.close()
+
+    def __del__(self) -> None:
+        self.close()

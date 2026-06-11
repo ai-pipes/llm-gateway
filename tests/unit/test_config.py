@@ -14,7 +14,7 @@ def config_file(tmp_path):
           port: 9000
 
         auth:
-          module: "gateway.middleware.auth.StaticKeyAuthProvider"
+          module: "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider"
           config:
             keys:
               "sk-dev":
@@ -51,7 +51,7 @@ def test_load_config_parses_gateway_section(config_file, monkeypatch):
 def test_load_config_parses_auth_section(config_file, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     config = load_config(config_file)
-    assert config.auth.module == "gateway.middleware.auth.StaticKeyAuthProvider"
+    assert config.auth.module == "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider"
     assert "sk-dev" in config.auth.config["keys"]
 
 
@@ -71,7 +71,7 @@ def test_load_config_env_interpolation(tmp_path, monkeypatch):
           port: 8080
 
         auth:
-          module: "gateway.middleware.auth.StaticKeyAuthProvider"
+          module: "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider"
           config:
             keys:
               "${MY_SECRET_KEY}":
@@ -98,7 +98,7 @@ def test_load_config_missing_env_var_raises(tmp_path):
           host: "0.0.0.0"
           port: 8080
         auth:
-          module: "gateway.middleware.auth.StaticKeyAuthProvider"
+          module: "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider"
           config: {}
         adapters:
           - name: openai
@@ -121,7 +121,7 @@ def test_load_config_missing_env_var_raises(tmp_path):
 def test_file_audit_config_requires_path(tmp_path):
     content = textwrap.dedent("""
         auth:
-          module: "gateway.middleware.auth.StaticKeyAuthProvider"
+          module: "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider"
           config: {}
         adapters: []
         sanitizers:
@@ -139,7 +139,7 @@ def test_file_audit_config_requires_path(tmp_path):
 def test_stdout_audit_config_default(tmp_path):
     content = textwrap.dedent("""
         auth:
-          module: "gateway.middleware.auth.StaticKeyAuthProvider"
+          module: "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider"
           config: {}
         adapters: []
         sanitizers:
@@ -154,7 +154,7 @@ def test_stdout_audit_config_default(tmp_path):
 
 def test_body_logging_disabled_by_default_stdout():
     data = {
-        "auth": {"module": "gateway.middleware.auth.StaticKeyAuthProvider", "config": {"keys": {}}},
+        "auth": {"module": "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider", "config": {"keys": {}}},
         "audit": {"type": "stdout"},
     }
     from gateway.config import Config
@@ -164,7 +164,7 @@ def test_body_logging_disabled_by_default_stdout():
 
 def test_body_logging_can_be_enabled_on_stdout():
     data = {
-        "auth": {"module": "gateway.middleware.auth.StaticKeyAuthProvider", "config": {"keys": {}}},
+        "auth": {"module": "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider", "config": {"keys": {}}},
         "audit": {"type": "stdout", "body_logging": {"enabled": True}},
     }
     from gateway.config import Config
@@ -174,7 +174,7 @@ def test_body_logging_can_be_enabled_on_stdout():
 
 def test_body_logging_disabled_by_default_file():
     data = {
-        "auth": {"module": "gateway.middleware.auth.StaticKeyAuthProvider", "config": {"keys": {}}},
+        "auth": {"module": "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider", "config": {"keys": {}}},
         "audit": {"type": "file", "path": "/tmp/audit.jsonl"},
     }
     from gateway.config import Config
@@ -184,7 +184,7 @@ def test_body_logging_disabled_by_default_file():
 
 def test_body_logging_on_plugin_audit():
     data = {
-        "auth": {"module": "gateway.middleware.auth.StaticKeyAuthProvider", "config": {"keys": {}}},
+        "auth": {"module": "gateway.infrastructure.auth.static_key.StaticKeyAuthProvider", "config": {"keys": {}}},
         "audit": {
             "type": "plugin",
             "module": "some.backend.Backend",

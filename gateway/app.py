@@ -13,7 +13,7 @@ from gateway.infrastructure.adapters.openai_compatible import OpenAICompatibleAd
 from gateway.infrastructure.audit.file_backend import FileAuditBackend
 from gateway.infrastructure.audit.stdout_backend import StdoutAuditBackend
 from gateway.infrastructure.auth.base import BaseAuthProvider
-from gateway.infrastructure.auth.static_key import AuthMiddleware
+from gateway.infrastructure.auth.middleware import AuthMiddleware
 
 
 def create_app_from_components(

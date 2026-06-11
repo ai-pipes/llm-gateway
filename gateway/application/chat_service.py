@@ -160,11 +160,11 @@ class ChatService:
             stream=True,
         )
 
-        chunks: list[str] = []
-        usage_out: dict = {}
+        chunks: list[str] = []          # buffer for audit body logging only — not used to delay the client
+        usage_out: dict = {}             # populated by adapter from the trailing usage SSE chunk
         status = "success"
         error: str | None = None
-        stream_complete = False
+        stream_complete = False          # True only when the async for loop exits normally
 
         try:
             async for chunk in adapter.stream_chat(chat_request, usage_out=usage_out):
@@ -181,8 +181,10 @@ class ChatService:
             error = str(exc)
             raise UpstreamError(str(exc)) from exc
         finally:
+            # finally runs on success, raised exception, AND GeneratorExit (client disconnect).
+            # GeneratorExit is a BaseException — a bare `except Exception` would miss it.
             if not stream_complete and status == "success":
-                status = "cancelled"
+                status = "cancelled"    # loop interrupted before normal exit → client disconnected
             full_text = "".join(chunks)
             output_actions: list[str] = []
             completion: str | None = None
