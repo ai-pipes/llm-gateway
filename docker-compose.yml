@@ -1,3 +1,4 @@
+# Prerequisites: cp gateway.yaml.example gateway.yaml && cp .env.example .env
 services:
   gateway:
     build: .
