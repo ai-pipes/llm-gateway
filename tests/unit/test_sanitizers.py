@@ -28,7 +28,7 @@ async def test_chain_runs_sanitizers_in_order():
         def __init__(self, suffix: str):
             self._suffix = suffix
 
-        async def sanitize(self, text: str) -> SanitizeResult:
+        async def sanitize(self, text: str, context=None) -> SanitizeResult:
             return SanitizeResult(text=text + self._suffix, actions=[f"appended:{self._suffix}"])
 
     chain = SanitizerChain([AppendSanitizer("-A"), AppendSanitizer("-B")])
@@ -39,11 +39,11 @@ async def test_chain_runs_sanitizers_in_order():
 
 async def test_chain_stops_on_blocked():
     class BlockingSanitizer(BaseSanitizer):
-        async def sanitize(self, text: str) -> SanitizeResult:
+        async def sanitize(self, text: str, context=None) -> SanitizeResult:
             return SanitizeResult(text=text, blocked=True, block_reason="test_block")
 
     class ShouldNotRunSanitizer(BaseSanitizer):
-        async def sanitize(self, text: str) -> SanitizeResult:
+        async def sanitize(self, text: str, context=None) -> SanitizeResult:
             raise AssertionError("Should not be called after block")
 
     chain = SanitizerChain([BlockingSanitizer(), ShouldNotRunSanitizer()])

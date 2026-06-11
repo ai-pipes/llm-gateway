@@ -423,3 +423,296 @@ async def test_complete_stream_cancelled_on_disconnect():
     audit.write.assert_called_once()
     record: AuditRecord = audit.write.call_args[0][0]
     assert record.status == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# Restoration tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_complete_restores_pii_in_response():
+    """LLM receives sanitized input; client gets response with original PII restored."""
+    from gateway.infrastructure.sanitizers.pii_regex import PiiRegexSanitizer
+    from gateway.domain.sanitizers.base import SanitizerChain
+
+    received_content: list[str] = []
+
+    async def _chat(req):
+        user_msg = next(m.content for m in req.messages if m.role == "user")
+        received_content.append(user_msg)
+        return ChatResponse(content=user_msg, model="mock", usage={})
+
+    a = MagicMock()
+    a.name = "mock"
+    a.chat = _chat
+
+    svc = ChatService(
+        input_chain=SanitizerChain([PiiRegexSanitizer(mode="replace")]),
+        output_chain=SanitizerChain([]),
+        registry=_registry(adapter=a),
+        audit=_audit(),
+        log_body=False,
+    )
+
+    response = await svc.complete(
+        raw_messages=[{"role": "user", "content": "My email is john@example.com"}],
+        model="gpt-mock", auth=_auth(), request_id="req-restore",
+    )
+
+    assert "john@example.com" not in received_content[0]
+    assert "john@example.com" in response.content
+    assert "[EMAIL_" not in response.content
+
+
+@pytest.mark.asyncio
+async def test_complete_injects_system_instruction_when_pii_present():
+    """A system message with placeholder instructions is prepended when PII is sanitized."""
+    from gateway.infrastructure.sanitizers.pii_regex import PiiRegexSanitizer
+    from gateway.domain.sanitizers.base import SanitizerChain
+
+    received_messages: list = []
+
+    async def _chat(req):
+        received_messages.extend(req.messages)
+        return ChatResponse(content="ok", model="mock", usage={})
+
+    a = MagicMock()
+    a.name = "mock"
+    a.chat = _chat
+
+    svc = ChatService(
+        input_chain=SanitizerChain([PiiRegexSanitizer(mode="replace")]),
+        output_chain=SanitizerChain([]),
+        registry=_registry(adapter=a),
+        audit=_audit(),
+        log_body=False,
+    )
+
+    await svc.complete(
+        raw_messages=[{"role": "user", "content": "My email is john@example.com"}],
+        model="gpt-mock", auth=_auth(), request_id="req-sys",
+    )
+
+    system_msgs = [m for m in received_messages if m.role == "system"]
+    assert len(system_msgs) == 1
+    assert "placeholder" in system_msgs[0].content.lower() or "TYPE_" in system_msgs[0].content
+
+
+@pytest.mark.asyncio
+async def test_complete_no_system_injection_when_no_pii():
+    """No system message is added if no PII was detected."""
+    from gateway.infrastructure.sanitizers.pii_regex import PiiRegexSanitizer
+    from gateway.domain.sanitizers.base import SanitizerChain
+
+    received_messages: list = []
+
+    async def _chat(req):
+        received_messages.extend(req.messages)
+        return ChatResponse(content="ok", model="mock", usage={})
+
+    a = MagicMock()
+    a.name = "mock"
+    a.chat = _chat
+
+    svc = ChatService(
+        input_chain=SanitizerChain([PiiRegexSanitizer(mode="replace")]),
+        output_chain=SanitizerChain([]),
+        registry=_registry(adapter=a),
+        audit=_audit(),
+        log_body=False,
+    )
+
+    await svc.complete(
+        raw_messages=[{"role": "user", "content": "Hello, how are you?"}],
+        model="gpt-mock", auth=_auth(), request_id="req-no-pii",
+    )
+
+    system_msgs = [m for m in received_messages if m.role == "system"]
+    assert len(system_msgs) == 0
+
+
+@pytest.mark.asyncio
+async def test_complete_appends_to_existing_system_message():
+    """System instruction is appended to an existing system message, not creating a new one."""
+    from gateway.infrastructure.sanitizers.pii_regex import PiiRegexSanitizer
+    from gateway.domain.sanitizers.base import SanitizerChain
+
+    received_messages: list = []
+
+    async def _chat(req):
+        received_messages.extend(req.messages)
+        return ChatResponse(content="ok", model="mock", usage={})
+
+    a = MagicMock()
+    a.name = "mock"
+    a.chat = _chat
+
+    svc = ChatService(
+        input_chain=SanitizerChain([PiiRegexSanitizer(mode="replace")]),
+        output_chain=SanitizerChain([]),
+        registry=_registry(adapter=a),
+        audit=_audit(),
+        log_body=False,
+    )
+
+    await svc.complete(
+        raw_messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "My email is john@example.com"},
+        ],
+        model="gpt-mock", auth=_auth(), request_id="req-sys-append",
+    )
+
+    system_msgs = [m for m in received_messages if m.role == "system"]
+    assert len(system_msgs) == 1
+    assert "You are a helpful assistant." in system_msgs[0].content
+    assert "TYPE_" in system_msgs[0].content or "placeholder" in system_msgs[0].content.lower()
+
+
+@pytest.mark.asyncio
+async def test_complete_audit_logs_sanitized_content_not_restored():
+    """Audit log must store sanitized (placeholder) content, not original PII."""
+    from gateway.infrastructure.sanitizers.pii_regex import PiiRegexSanitizer
+    from gateway.domain.sanitizers.base import SanitizerChain
+
+    async def _chat(req):
+        user_msg = next(m.content for m in req.messages if m.role == "user")
+        return ChatResponse(content=user_msg, model="mock", usage={})
+
+    a = MagicMock()
+    a.name = "mock"
+    a.chat = _chat
+    audit = _audit()
+
+    svc = ChatService(
+        input_chain=SanitizerChain([PiiRegexSanitizer(mode="replace")]),
+        output_chain=SanitizerChain([]),
+        registry=_registry(adapter=a),
+        audit=audit,
+        log_body=True,
+    )
+
+    await svc.complete(
+        raw_messages=[{"role": "user", "content": "My email is john@example.com"}],
+        model="gpt-mock", auth=_auth(), request_id="req-audit",
+    )
+
+    record: AuditRecord = audit.write.call_args[0][0]
+    assert "john@example.com" not in (record.completion or "")
+    assert "[EMAIL_" in (record.completion or "")
+
+
+# ---------------------------------------------------------------------------
+# complete_stream — PII restoration tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_complete_stream_restores_pii_in_output():
+    """Placeholders in streamed chunks are restored before yielding to caller."""
+    from unittest.mock import patch
+    from gateway.domain.sanitizers.base import BaseSanitizer, SanitizerChain
+
+    with patch("gateway.domain.sanitizers.restoration.secrets.token_hex", return_value="aabbccdd"):
+        placeholder = "[EMAIL_ADDRESS_aabbccdd]"
+
+        class RestoringSanitizer(BaseSanitizer):
+            async def sanitize(self, text: str, context=None) -> SanitizeResult:
+                if context is not None:
+                    ph = context.register("john@example.com", "EMAIL_ADDRESS")
+                    return SanitizeResult(text=ph, actions=["replaced:EMAIL_ADDRESS"])
+                return SanitizeResult(text=text)
+
+        # Adapter yields the known placeholder split across two chunks
+        adapter = _streaming_adapter(chunks=[placeholder[:10], placeholder[10:] + " confirmed"])
+
+        svc = ChatService(
+            input_chain=SanitizerChain([RestoringSanitizer()]),
+            output_chain=SanitizerChain([]),
+            registry=_registry(adapter=adapter),
+            audit=_audit(),
+            log_body=False,
+        )
+        chunks = await _collect_stream(svc.complete_stream(
+            raw_messages=[{"role": "user", "content": "my email john@example.com"}],
+            model="gpt-mock", auth=_auth(), request_id="sr-1",
+        ))
+        result = "".join(chunks)
+        assert "john@example.com" in result
+        assert placeholder not in result
+
+
+@pytest.mark.asyncio
+async def test_complete_stream_audit_receives_placeholder_not_original():
+    """Audit chunks contain placeholders; the restored email must not appear there."""
+    from unittest.mock import patch
+    from gateway.domain.sanitizers.base import BaseSanitizer, SanitizerChain
+
+    with patch("gateway.domain.sanitizers.restoration.secrets.token_hex", return_value="aabbccdd"):
+        placeholder = "[EMAIL_ADDRESS_aabbccdd]"
+
+        class RestoringSanitizer(BaseSanitizer):
+            async def sanitize(self, text: str, context=None) -> SanitizeResult:
+                if context is not None:
+                    ph = context.register("john@example.com", "EMAIL_ADDRESS")
+                    return SanitizeResult(text=ph, actions=["replaced:EMAIL_ADDRESS"])
+                return SanitizeResult(text=text)
+
+        adapter = _streaming_adapter(chunks=[placeholder])
+        audit = _audit()
+
+        svc = ChatService(
+            input_chain=SanitizerChain([RestoringSanitizer()]),
+            output_chain=SanitizerChain([]),
+            registry=_registry(adapter=adapter),
+            audit=audit,
+            log_body=True,
+        )
+        await _collect_stream(svc.complete_stream(
+            raw_messages=[{"role": "user", "content": "my email john@example.com"}],
+            model="gpt-mock", auth=_auth(), request_id="sr-2",
+        ))
+        record: AuditRecord = audit.write.call_args[0][0]
+        # Audit body must not contain the restored original
+        assert "john@example.com" not in (record.completion or "")
+
+
+@pytest.mark.asyncio
+async def test_complete_stream_injects_system_instruction_when_replacements():
+    """System instruction is added to messages before stream when PII was replaced."""
+    from unittest.mock import patch
+    from gateway.domain.sanitizers.base import BaseSanitizer, SanitizerChain
+
+    with patch("gateway.domain.sanitizers.restoration.secrets.token_hex", return_value="aabbccdd"):
+        captured_request = []
+
+        class RestoringSanitizer(BaseSanitizer):
+            async def sanitize(self, text: str, context=None) -> SanitizeResult:
+                if context is not None:
+                    ph = context.register("john@example.com", "EMAIL_ADDRESS")
+                    return SanitizeResult(text=ph, actions=["replaced:EMAIL_ADDRESS"])
+                return SanitizeResult(text=text)
+
+        a = MagicMock()
+        a.name = "mock"
+
+        async def _stream_chat(request, usage_out=None):
+            captured_request.append(request)
+            yield "ok"
+
+        a.stream_chat = _stream_chat
+
+        svc = ChatService(
+            input_chain=SanitizerChain([RestoringSanitizer()]),
+            output_chain=SanitizerChain([]),
+            registry=_registry(adapter=a),
+            audit=_audit(),
+            log_body=False,
+        )
+        await _collect_stream(svc.complete_stream(
+            raw_messages=[{"role": "user", "content": "email john@example.com"}],
+            model="gpt-mock", auth=_auth(), request_id="sr-3",
+        ))
+        messages = captured_request[0].messages
+        system_msgs = [m for m in messages if m.role == "system"]
+        assert system_msgs, "system message should be injected"
+        assert "placeholder" in system_msgs[0].content.lower()

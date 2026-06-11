@@ -1,3 +1,6 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
 try:
     from presidio_analyzer import AnalyzerEngine
     from presidio_anonymizer import AnonymizerEngine
@@ -8,6 +11,9 @@ except ImportError:
     AnonymizerEngine = None
 
 from gateway.domain.sanitizers.base import BaseSanitizer, SanitizeResult
+
+if TYPE_CHECKING:
+    from gateway.domain.sanitizers.restoration import RestorationContext
 
 
 class PresidioSanitizer(BaseSanitizer):
@@ -30,7 +36,9 @@ class PresidioSanitizer(BaseSanitizer):
         self._language = language
         self._entities = entities  # None = detect all supported entities
 
-    async def sanitize(self, text: str) -> SanitizeResult:
+    async def sanitize(
+        self, text: str, context: "RestorationContext | None" = None
+    ) -> SanitizeResult:
         results = self._analyzer.analyze(
             text=text,
             language=self._language,
@@ -39,6 +47,37 @@ class PresidioSanitizer(BaseSanitizer):
         if not results:
             return SanitizeResult(text=text)
 
-        anonymized = self._anonymizer.anonymize(text=text, analyzer_results=results)
-        actions = list({f"replaced:{r.entity_type}" for r in results})
-        return SanitizeResult(text=anonymized.text, actions=actions)
+        if context is None:
+            anonymized = self._anonymizer.anonymize(text=text, analyzer_results=results)
+            actions = list({f"replaced:{r.entity_type}" for r in results})
+            return SanitizeResult(text=anonymized.text, actions=actions)
+
+        # Resolve overlapping spans: keep highest-confidence (then longest) span per conflict
+        kept = _resolve_conflicts(results)
+
+        # Replace spans right-to-left to keep earlier indices valid
+        sorted_results = sorted(kept, key=lambda r: r.start, reverse=True)
+        anonymized_text = text
+        for r in sorted_results:
+            original_span = text[r.start:r.end]
+            placeholder = context.register(original_span, r.entity_type)
+            anonymized_text = (
+                anonymized_text[: r.start] + placeholder + anonymized_text[r.end :]
+            )
+
+        actions = list({f"replaced:{r.entity_type}" for r in kept})
+        return SanitizeResult(text=anonymized_text, actions=actions)
+
+
+def _resolve_conflicts(results: list) -> list:
+    """Return a non-overlapping subset of Presidio results.
+
+    When spans overlap, keep the one with the highest score, breaking ties by longest span.
+    """
+    # Highest score first, then longest span
+    by_priority = sorted(results, key=lambda r: (r.score, r.end - r.start), reverse=True)
+    kept: list = []
+    for r in by_priority:
+        if not any(max(r.start, k.start) < min(r.end, k.end) for k in kept):
+            kept.append(r)
+    return kept

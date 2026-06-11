@@ -63,7 +63,7 @@ def test_401_request_does_not_write_audit(client, audit_capture):
 
 def test_blocked_sanitizer_returns_400(audit_capture):
     class BlockEverythingSanitizer(BaseSanitizer):
-        async def sanitize(self, text: str) -> SanitizeResult:
+        async def sanitize(self, text: str, context=None) -> SanitizeResult:
             return SanitizeResult(text=text, blocked=True, block_reason="test_block")
 
     from tests.conftest import MockLLMAdapter
@@ -89,7 +89,7 @@ def test_blocked_sanitizer_returns_400(audit_capture):
 
 def test_blocked_request_writes_audit_with_status_blocked(audit_capture):
     class BlockEverythingSanitizer(BaseSanitizer):
-        async def sanitize(self, text: str) -> SanitizeResult:
+        async def sanitize(self, text: str, context=None) -> SanitizeResult:
             return SanitizeResult(text=text, blocked=True, block_reason="pii_detected")
 
     from tests.conftest import MockLLMAdapter

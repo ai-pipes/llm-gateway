@@ -1,5 +1,7 @@
+import re
 import pytest
 from gateway.infrastructure.sanitizers.pii_regex import PiiRegexSanitizer
+from gateway.domain.sanitizers.restoration import RestorationContext
 
 
 @pytest.mark.asyncio
@@ -89,3 +91,52 @@ async def test_block_mode_stops_on_first_pii_type():
     assert result.blocked is True
     assert result.block_reason == "pii_detected:EMAIL"
     assert result.actions == ["blocked:EMAIL"]
+
+
+@pytest.mark.asyncio
+async def test_replace_with_context_registers_email():
+    s = PiiRegexSanitizer(mode="replace")
+    ctx = RestorationContext()
+    result = await s.sanitize("Contact alice@example.com", ctx)
+    assert ctx.has_replacements()
+    assert re.search(r"\[EMAIL_[0-9a-f]{8}\]", result.text)
+    assert "alice@example.com" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_replace_with_context_two_different_emails_get_different_placeholders():
+    s = PiiRegexSanitizer(mode="replace")
+    ctx = RestorationContext()
+    result = await s.sanitize("From alice@example.com to bob@corp.io", ctx)
+    placeholders = re.findall(r"\[EMAIL_[0-9a-f]{8}\]", result.text)
+    assert len(placeholders) == 2
+    assert placeholders[0] != placeholders[1]
+
+
+@pytest.mark.asyncio
+async def test_replace_with_context_same_email_twice_gets_same_placeholder():
+    s = PiiRegexSanitizer(mode="replace")
+    ctx = RestorationContext()
+    result = await s.sanitize("alice@example.com and alice@example.com", ctx)
+    placeholders = re.findall(r"\[EMAIL_[0-9a-f]{8}\]", result.text)
+    assert len(placeholders) == 2
+    assert placeholders[0] == placeholders[1]
+
+
+@pytest.mark.asyncio
+async def test_replace_with_context_restore_roundtrip():
+    s = PiiRegexSanitizer(mode="replace")
+    ctx = RestorationContext()
+    original = "Email alice@example.com, phone +1 (555) 123-4567"
+    result = await s.sanitize(original, ctx)
+    restored = ctx.restore(result.text)
+    assert restored == original
+
+
+@pytest.mark.asyncio
+async def test_block_mode_ignores_context():
+    s = PiiRegexSanitizer(mode="block")
+    ctx = RestorationContext()
+    result = await s.sanitize("secret@corp.com", ctx)
+    assert result.blocked is True
+    assert not ctx.has_replacements()

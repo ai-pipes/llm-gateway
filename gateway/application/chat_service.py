@@ -1,3 +1,4 @@
+import dataclasses
 import time
 import httpx
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from gateway.domain.exceptions import (
     SanitizerBlockedError, AdapterNotFoundError, UpstreamTimeoutError, UpstreamError,
 )
 from gateway.domain.sanitizers.base import SanitizerChain
+from gateway.domain.sanitizers.restoration import RestorationContext, StreamingRestorer
 from gateway.domain.audit.base import BaseAuditBackend
 from gateway.infrastructure.adapters.registry import AdapterRegistry
 
@@ -34,13 +36,14 @@ class ChatService:
         auth: AuthContext,
         request_id: str,
         start: float,
+        context: RestorationContext | None = None,
     ) -> tuple[list[dict], list[str]]:
         """Returns (sanitized_messages, input_actions). Raises SanitizerBlockedError if blocked."""
         input_actions: list[str] = []
         sanitized_messages: list[dict] = []
         for msg in raw_messages:
             if isinstance(msg.get("content"), str):
-                result = await self._input.run(msg["content"])
+                result = await self._input.run(msg["content"], context)
                 input_actions.extend(result.actions)
                 if result.blocked:
                     await self._audit.write(self._record(
@@ -90,9 +93,14 @@ class ChatService:
         adapter_name: str | None = None,
     ) -> ChatResponse:
         start = time.monotonic()
+        context = RestorationContext()
         sanitized_messages, input_actions = await self._sanitize_input(
-            raw_messages, model, auth, request_id, start
+            raw_messages, model, auth, request_id, start, context=context
         )
+        if context.has_replacements():
+            sanitized_messages = _inject_system_instruction(
+                sanitized_messages, context.build_system_instruction()
+            )
         adapter = await self._resolve_adapter(
             adapter_name, model, auth, request_id, start, input_actions, sanitized_messages
         )
@@ -125,6 +133,11 @@ class ChatService:
             ))
             raise UpstreamError(str(exc)) from exc
 
+        # Save sanitized content for audit BEFORE restoring PII (audit must not log raw PII)
+        sanitized_content = response.content
+        if context.has_replacements():
+            response = dataclasses.replace(response, content=context.restore(response.content))
+
         await self._audit.write(self._record(
             request_id=request_id, auth=auth, adapter=adapter.name, model=response.model,
             prompt_tokens=response.usage.get("prompt_tokens", 0),
@@ -133,7 +146,7 @@ class ChatService:
             input_actions=input_actions, output_actions=[],
             status="success",
             messages=sanitized_messages if self._log_body else None,
-            completion=response.content if self._log_body else None,
+            completion=sanitized_content if self._log_body else None,
         ))
 
         return response
@@ -147,9 +160,14 @@ class ChatService:
         adapter_name: str | None = None,
     ) -> AsyncGenerator[str, None]:
         start = time.monotonic()
+        context = RestorationContext()
         sanitized_messages, input_actions = await self._sanitize_input(
-            raw_messages, model, auth, request_id, start
+            raw_messages, model, auth, request_id, start, context=context
         )
+        if context.has_replacements():
+            sanitized_messages = _inject_system_instruction(
+                sanitized_messages, context.build_system_instruction()
+            )
         adapter = await self._resolve_adapter(
             adapter_name, model, auth, request_id, start, input_actions, sanitized_messages
         )
@@ -160,7 +178,8 @@ class ChatService:
             stream=True,
         )
 
-        chunks: list[str] = []          # buffer for audit body logging only — not used to delay the client
+        restorer = StreamingRestorer(context) if context.has_replacements() else None
+        chunks: list[str] = []          # raw chunks for audit (placeholder version, not restored)
         usage_out: dict = {}             # populated by adapter from the trailing usage SSE chunk
         status = "success"
         error: str | None = None
@@ -169,7 +188,16 @@ class ChatService:
         try:
             async for chunk in adapter.stream_chat(chat_request, usage_out=usage_out):
                 chunks.append(chunk)
-                yield chunk
+                if restorer:
+                    safe = restorer.feed(chunk)
+                    if safe:
+                        yield safe
+                else:
+                    yield chunk
+            if restorer:
+                tail = restorer.finalize()
+                if tail:
+                    yield tail
             stream_complete = True
 
         except httpx.TimeoutException:
@@ -244,6 +272,14 @@ class ChatService:
             messages=messages,
             completion=completion,
         )
+
+
+def _inject_system_instruction(messages: list[dict], instruction: str) -> list[dict]:
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "system" and isinstance(msg.get("content"), str):
+            updated = {**msg, "content": msg["content"] + "\n\n" + instruction}
+            return messages[:i] + [updated] + messages[i + 1:]
+    return [{"role": "system", "content": instruction}] + messages
 
 
 def _ms(start: float) -> int:

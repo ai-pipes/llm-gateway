@@ -1,5 +1,10 @@
+from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from gateway.domain.sanitizers.restoration import RestorationContext
 
 
 @dataclass
@@ -12,7 +17,9 @@ class SanitizeResult:
 
 class BaseSanitizer(ABC):
     @abstractmethod
-    async def sanitize(self, text: str) -> SanitizeResult:
+    async def sanitize(
+        self, text: str, context: "RestorationContext | None" = None
+    ) -> SanitizeResult:
         ...
 
 
@@ -20,10 +27,12 @@ class SanitizerChain:
     def __init__(self, sanitizers: list[BaseSanitizer]):
         self._sanitizers = sanitizers
 
-    async def run(self, text: str) -> SanitizeResult:
+    async def run(
+        self, text: str, context: "RestorationContext | None" = None
+    ) -> SanitizeResult:
         result = SanitizeResult(text=text)
         for s in self._sanitizers:
-            r = await s.sanitize(result.text)
+            r = await s.sanitize(result.text, context)
             result.text = r.text
             result.actions.extend(r.actions)
             if r.blocked:
