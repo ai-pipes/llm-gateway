@@ -32,6 +32,7 @@ def create_router(chat_service: ChatService) -> APIRouter:
                 auth=request.state.auth,
                 request_id=request_id,
                 adapter_name=body.get("adapter"),
+                tools=body.get("tools"),
             )
         except SanitizerBlockedError as e:
             return JSONResponse(
@@ -62,6 +63,11 @@ def create_router(chat_service: ChatService) -> APIRouter:
                 status_code=502,
             )
 
+        finish_reason = "tool_calls" if response.tool_calls else "stop"
+        message: dict = {"role": "assistant", "content": response.content}
+        if response.tool_calls:
+            message["tool_calls"] = response.tool_calls
+
         return {
             "id": f"chatcmpl-{request_id}",
             "object": "chat.completion",
@@ -69,8 +75,8 @@ def create_router(chat_service: ChatService) -> APIRouter:
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": response.content},
-                    "finish_reason": "stop",
+                    "message": message,
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": response.usage,
@@ -102,16 +108,24 @@ async def _sse_stream(
         return f"data: {json.dumps(payload)}\n\n"
 
     try:
+        has_tool_calls = False
         async for chunk in chat_service.complete_stream(
             raw_messages=body.get("messages", []),
             model=model,
             auth=request.state.auth,
             request_id=request_id,
             adapter_name=body.get("adapter"),
+            tools=body.get("tools"),
         ):
-            yield _chunk(chunk)
+            if isinstance(chunk, str):
+                yield _chunk(chunk)
+            else:
+                if "tool_calls" in chunk:
+                    has_tool_calls = True
+                yield _chunk("", delta=chunk)
 
-        yield _chunk("", finish_reason="stop", delta={})
+        finish_reason = "tool_calls" if has_tool_calls else "stop"
+        yield _chunk("", finish_reason=finish_reason, delta={})
 
     except SanitizerBlockedError as e:
         yield _error("sanitizer_blocked", f"Input blocked: {e.reason}")

@@ -12,8 +12,11 @@ class BaseLLMAdapter(ABC):
 
     async def stream_chat(
         self, request: ChatRequest, usage_out: dict | None = None
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str | dict, None]:
         # Default: wraps chat() as a single-chunk stream for adapters that don't
         # support native streaming. Override for true token-by-token streaming.
         response = await self.chat(request)
-        yield response.content
+        if response.content is not None:
+            yield response.content
+        if response.tool_calls:
+            yield {"tool_calls": response.tool_calls}

@@ -227,6 +227,100 @@ async def test_stream_chat_raises_on_http_error(adapter):
             _ = [c async for c in adapter.stream_chat(ChatRequest(model="x", messages=[]))]
 
 
+def test_build_payload_includes_tools(adapter):
+    tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+    req = ChatRequest(model="gpt-4o", messages=[], tools=tools)
+    payload = adapter._build_payload(req)
+    assert payload["tools"] == tools
+
+
+def test_build_payload_no_tools_key_when_none(adapter):
+    req = ChatRequest(model="gpt-4o", messages=[])
+    payload = adapter._build_payload(req)
+    assert "tools" not in payload
+
+
+def test_build_payload_serialises_tool_calls_in_message(adapter):
+    tool_calls = [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
+    msg = ChatMessage(role="assistant", tool_calls=tool_calls)
+    req = ChatRequest(model="gpt-4o", messages=[msg])
+    payload = adapter._build_payload(req)
+    assert payload["messages"][0]["tool_calls"] == tool_calls
+    assert payload["messages"][0]["content"] is None
+
+
+def test_build_payload_serialises_tool_call_id_in_message(adapter):
+    msg = ChatMessage(role="tool", content="result", tool_call_id="c1")
+    req = ChatRequest(model="gpt-4o", messages=[msg])
+    payload = adapter._build_payload(req)
+    assert payload["messages"][0]["tool_call_id"] == "c1"
+    assert payload["messages"][0]["content"] == "result"
+
+
+async def test_openai_adapter_chat_parses_tool_calls(adapter):
+    tool_calls = [{"id": "c1", "type": "function", "function": {"name": "search", "arguments": '{"q":"test"}'}}]
+    fake_response_data = {
+        "choices": [{"message": {"role": "assistant", "content": None, "tool_calls": tool_calls}}],
+        "model": "gpt-4o",
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+    fake_request = httpx.Request("POST", "https://api.example.com/v1/chat/completions")
+    mock_response = httpx.Response(200, json=fake_response_data, request=fake_request)
+
+    with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_response):
+        request = ChatRequest(model="gpt-4o", messages=[ChatMessage(role="user", content="search for test")])
+        response = await adapter.chat(request)
+
+    assert response.content is None
+    assert response.tool_calls == tool_calls
+
+
+async def test_stream_chat_yields_tool_call_delta(adapter):
+    tool_call_delta = [{"index": 0, "id": "c1", "type": "function", "function": {"name": "search", "arguments": ""}}]
+    lines = [
+        'data: ' + _json.dumps({"choices": [{"delta": {"tool_calls": tool_call_delta}, "index": 0}]}),
+        'data: ' + _json.dumps({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"q":"x"}'}}]}, "index": 0}]}),
+        'data: [DONE]',
+    ]
+    mock_cls = _make_stream_mock(lines)
+    with patch("gateway.infrastructure.adapters.openai_compatible.httpx.AsyncClient", mock_cls):
+        request = ChatRequest(model="gpt-4o", messages=[], tools=[{"type": "function", "function": {"name": "search"}}])
+        chunks = [c async for c in adapter.stream_chat(request)]
+    assert len(chunks) == 2
+    assert all(isinstance(c, dict) for c in chunks)
+    assert chunks[0]["tool_calls"] == tool_call_delta
+
+
+async def test_stream_chat_mixes_text_and_tool_call_deltas(adapter):
+    tool_call_delta = [{"index": 0, "id": "c1", "function": {"name": "search", "arguments": ""}}]
+    lines = [
+        'data: ' + _json.dumps({"choices": [{"delta": {"content": "Hello"}, "index": 0}]}),
+        'data: ' + _json.dumps({"choices": [{"delta": {"tool_calls": tool_call_delta}, "index": 0}]}),
+        'data: [DONE]',
+    ]
+    mock_cls = _make_stream_mock(lines)
+    with patch("gateway.infrastructure.adapters.openai_compatible.httpx.AsyncClient", mock_cls):
+        chunks = [c async for c in adapter.stream_chat(ChatRequest(model="gpt-4o", messages=[]))]
+    assert chunks[0] == "Hello"
+    assert isinstance(chunks[1], dict)
+    assert "tool_calls" in chunks[1]
+
+
+async def test_base_adapter_stream_chat_yields_tool_calls_from_response():
+    tool_calls = [{"id": "c1", "type": "function", "function": {"name": "search", "arguments": "{}"}}]
+
+    class ConcreteAdapter(BaseLLMAdapter):
+        name = "test"
+        async def chat(self, request):
+            return ChatResponse(model="test", usage={}, tool_calls=tool_calls)
+
+    adapter = ConcreteAdapter()
+    chunks = [c async for c in adapter.stream_chat(ChatRequest(model="test", messages=[]))]
+    assert len(chunks) == 1
+    assert isinstance(chunks[0], dict)
+    assert chunks[0]["tool_calls"] == tool_calls
+
+
 async def test_stream_chat_usage_after_done_sentinel(adapter):
     # Some providers (OpenAI) send the usage chunk AFTER [DONE]
     lines = [

@@ -91,6 +91,7 @@ class ChatService:
         auth: AuthContext,
         request_id: str,
         adapter_name: str | None = None,
+        tools: list[dict] | None = None,
     ) -> ChatResponse:
         start = time.monotonic()
         context = RestorationContext()
@@ -108,6 +109,7 @@ class ChatService:
         chat_request = ChatRequest(
             model=model,
             messages=[ChatMessage(**m) for m in sanitized_messages],
+            tools=tools,
         )
 
         try:
@@ -135,7 +137,7 @@ class ChatService:
 
         # Save sanitized content for audit BEFORE restoring PII (audit must not log raw PII)
         sanitized_content = response.content
-        if context.has_replacements():
+        if context.has_replacements() and response.content is not None:
             response = dataclasses.replace(response, content=context.restore(response.content))
 
         await self._audit.write(self._record(
@@ -158,7 +160,8 @@ class ChatService:
         auth: AuthContext,
         request_id: str,
         adapter_name: str | None = None,
-    ) -> AsyncGenerator[str, None]:
+        tools: list[dict] | None = None,
+    ) -> AsyncGenerator[str | dict, None]:
         start = time.monotonic()
         context = RestorationContext()
         sanitized_messages, input_actions = await self._sanitize_input(
@@ -176,6 +179,7 @@ class ChatService:
             model=model,
             messages=[ChatMessage(**m) for m in sanitized_messages],
             stream=True,
+            tools=tools,
         )
 
         restorer = StreamingRestorer(context) if context.has_replacements() else None
@@ -187,12 +191,16 @@ class ChatService:
 
         try:
             async for chunk in adapter.stream_chat(chat_request, usage_out=usage_out):
-                chunks.append(chunk)
-                if restorer:
-                    safe = restorer.feed(chunk)
-                    if safe:
-                        yield safe
+                if isinstance(chunk, str):
+                    chunks.append(chunk)
+                    if restorer:
+                        safe = restorer.feed(chunk)
+                        if safe:
+                            yield safe
+                    else:
+                        yield chunk
                 else:
+                    # dict chunk (tool_call delta) — pass through without sanitization
                     yield chunk
             if restorer:
                 tail = restorer.finalize()

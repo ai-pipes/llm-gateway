@@ -12,7 +12,9 @@ class AuthContext:
 @dataclass
 class ChatMessage:
     role: str
-    content: str
+    content: str | None = None
+    tool_calls: list[dict] | None = None
+    tool_call_id: str | None = None
 
 
 @dataclass
@@ -21,13 +23,15 @@ class ChatRequest:
     messages: list[ChatMessage]
     temperature: float = 0.7
     stream: bool = False
+    tools: list[dict] | None = None
 
 
 @dataclass
 class ChatResponse:
-    content: str
     model: str
     usage: dict
+    content: str | None = None
+    tool_calls: list[dict] | None = None
 
 
 @dataclass

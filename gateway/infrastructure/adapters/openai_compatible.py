@@ -21,14 +21,22 @@ class OpenAICompatibleAdapter(BaseLLMAdapter):
         return f"OpenAICompatibleAdapter(name={self.name!r}, base_url={self._base_url!r})"
 
     def _build_payload(self, request: ChatRequest, stream: bool = False) -> dict:
-        payload = {
+        messages = []
+        for m in request.messages:
+            msg: dict = {"role": m.role, "content": m.content}
+            if m.tool_calls is not None:
+                msg["tool_calls"] = m.tool_calls
+            if m.tool_call_id is not None:
+                msg["tool_call_id"] = m.tool_call_id
+            messages.append(msg)
+
+        payload: dict = {
             "model": request.model,
-            "messages": [
-                {"role": m.role, "content": m.content}
-                for m in request.messages
-            ],
+            "messages": messages,
             "temperature": request.temperature,
         }
+        if request.tools:
+            payload["tools"] = request.tools
         if stream:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
@@ -47,15 +55,17 @@ class OpenAICompatibleAdapter(BaseLLMAdapter):
         choices = data.get("choices") or []
         if not choices:
             raise ValueError(f"LLM response contained no choices: {data}")
+        message = choices[0].get("message", {})
         return ChatResponse(
-            content=choices[0]["message"]["content"],
             model=data.get("model", request.model),
             usage=data.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            content=message.get("content"),
+            tool_calls=message.get("tool_calls"),
         )
 
     async def stream_chat(
         self, request: ChatRequest, usage_out: dict | None = None
-    ) -> AsyncGenerator[str, None]:
+    ) -> AsyncGenerator[str | dict, None]:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             async with client.stream(
                 "POST",
@@ -70,8 +80,8 @@ class OpenAICompatibleAdapter(BaseLLMAdapter):
                         continue
                     payload = line[6:]
                     if payload == "[DONE]":
-                        stream_done = True
-                        continue  # keep iterating in case usage chunk follows
+                        stream_done = True  # keep iterating in case usage chunk follows
+                        continue
                     data = json.loads(payload)
                     if usage_out is not None and data.get("usage"):
                         usage_out.update(data["usage"])
@@ -81,8 +91,11 @@ class OpenAICompatibleAdapter(BaseLLMAdapter):
                     if not choices:
                         continue
                     choice = choices[0]
-                    if not isinstance(choice, dict):  # guard against choices: [null]
+                    if not isinstance(choice, dict):
                         continue
-                    content = choice.get("delta", {}).get("content", "")
+                    delta = choice.get("delta", {})
+                    content = delta.get("content")
                     if content:
                         yield content
+                    if delta.get("tool_calls"):
+                        yield {"tool_calls": delta["tool_calls"]}

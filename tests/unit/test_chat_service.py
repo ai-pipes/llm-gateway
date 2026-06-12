@@ -677,6 +677,122 @@ async def test_complete_stream_audit_receives_placeholder_not_original():
 
 
 @pytest.mark.asyncio
+async def test_complete_passes_tools_to_adapter():
+    tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+    received_requests: list = []
+
+    async def _chat(req):
+        received_requests.append(req)
+        return ChatResponse(model="mock", usage={})
+
+    a = MagicMock()
+    a.name = "mock"
+    a.chat = _chat
+
+    await _service(registry=_registry(adapter=a)).complete(
+        raw_messages=[{"role": "user", "content": "hello"}],
+        model="gpt-mock",
+        auth=_auth(),
+        request_id="t-1",
+        tools=tools,
+    )
+    assert received_requests[0].tools == tools
+
+
+@pytest.mark.asyncio
+async def test_complete_returns_tool_calls_from_adapter():
+    tool_calls = [{"id": "c1", "type": "function", "function": {"name": "search", "arguments": "{}"}}]
+    a = AsyncMock()
+    a.name = "mock"
+    a.chat = AsyncMock(return_value=ChatResponse(model="mock", usage={}, tool_calls=tool_calls))
+
+    response = await _service(registry=_registry(adapter=a)).complete(
+        raw_messages=[{"role": "user", "content": "hello"}],
+        model="gpt-mock",
+        auth=_auth(),
+        request_id="t-2",
+        tools=[{"type": "function", "function": {"name": "search"}}],
+    )
+    assert response.tool_calls == tool_calls
+    assert response.content is None
+
+
+@pytest.mark.asyncio
+async def test_complete_tool_role_message_passes_through_sanitizer():
+    """role:tool messages with string content are sanitized like any other message."""
+    received_requests: list = []
+
+    async def _chat(req):
+        received_requests.append(req)
+        return ChatResponse(model="mock", usage={})
+
+    a = MagicMock()
+    a.name = "mock"
+    a.chat = _chat
+
+    await _service(registry=_registry(adapter=a)).complete(
+        raw_messages=[
+            {"role": "user", "content": "call search"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "function": {"name": "search", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "search result"},
+        ],
+        model="gpt-mock",
+        auth=_auth(),
+        request_id="t-3",
+    )
+    msgs = received_requests[0].messages
+    tool_msg = next(m for m in msgs if m.role == "tool")
+    assert tool_msg.tool_call_id == "c1"
+    assert tool_msg.content == "sanitized"  # passed through sanitizer chain
+
+
+@pytest.mark.asyncio
+async def test_complete_stream_passes_tools_to_adapter():
+    tools = [{"type": "function", "function": {"name": "search"}}]
+    received_requests: list = []
+
+    a = MagicMock()
+    a.name = "mock"
+
+    async def _stream_chat(request, usage_out=None):
+        received_requests.append(request)
+        yield "ok"
+
+    a.stream_chat = _stream_chat
+
+    svc = _service(registry=_registry(adapter=a))
+    await _collect_stream(svc.complete_stream(
+        raw_messages=[{"role": "user", "content": "hi"}],
+        model="gpt-mock", auth=_auth(), request_id="st-1",
+        tools=tools,
+    ))
+    assert received_requests[0].tools == tools
+
+
+@pytest.mark.asyncio
+async def test_complete_stream_passes_dict_chunks_through():
+    """Dict chunks (tool_call deltas) bypass restorer/audit and are yielded as-is."""
+    tool_delta = {"tool_calls": [{"index": 0, "id": "c1", "function": {"name": "search", "arguments": ""}}]}
+
+    a = MagicMock()
+    a.name = "mock"
+
+    async def _stream_chat(request, usage_out=None):
+        yield "text chunk"
+        yield tool_delta
+
+    a.stream_chat = _stream_chat
+
+    svc = _service(registry=_registry(adapter=a))
+    chunks = await _collect_stream(svc.complete_stream(
+        raw_messages=[{"role": "user", "content": "hi"}],
+        model="gpt-mock", auth=_auth(), request_id="st-2",
+    ))
+    assert "text chunk" in chunks
+    assert tool_delta in chunks
+
+
+@pytest.mark.asyncio
 async def test_complete_stream_injects_system_instruction_when_replacements():
     """System instruction is added to messages before stream when PII was replaced."""
     from unittest.mock import patch
