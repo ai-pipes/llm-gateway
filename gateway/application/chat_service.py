@@ -193,6 +193,9 @@ class ChatService:
         status = "success"
         error: str | None = None
         stream_complete = False          # True only when the async for loop exits normally
+        # Per tool_call index restorer: buffers only around placeholder boundaries,
+        # emits everything else immediately — preserving true argument streaming.
+        tc_restorers: dict[int, StreamingRestorer] = {}
 
         try:
             async for chunk in adapter.stream_chat(chat_request, usage_out=usage_out):
@@ -205,10 +208,28 @@ class ChatService:
                     else:
                         yield chunk
                 else:
-                    # dict chunk (tool_call delta) — restore PII placeholders if needed
                     if context.has_replacements():
-                        chunk = json.loads(context.restore(json.dumps(chunk)))
-                    yield chunk
+                        out_tcs = []
+                        for tc in chunk.get("tool_calls", []):
+                            idx = tc.get("index", 0)
+                            func = tc.get("function", {})
+                            if "arguments" in func:
+                                if idx not in tc_restorers:
+                                    tc_restorers[idx] = StreamingRestorer(context)
+                                safe = tc_restorers[idx].feed(func["arguments"])
+                                out_tcs.append({**tc, "function": {**func, "arguments": safe}})
+                            else:
+                                out_tcs.append(tc)
+                        yield {**chunk, "tool_calls": out_tcs}
+                    else:
+                        yield chunk
+
+            # Flush any remaining buffered placeholder prefix per index
+            for idx in sorted(tc_restorers.keys()):
+                tail = tc_restorers[idx].finalize()
+                if tail:
+                    yield {"tool_calls": [{"index": idx, "function": {"arguments": tail}}]}
+
             if restorer:
                 tail = restorer.finalize()
                 if tail:

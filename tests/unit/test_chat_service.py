@@ -891,7 +891,7 @@ async def test_complete_restores_pii_in_tool_call_arguments():
 
 @pytest.mark.asyncio
 async def test_complete_stream_restores_pii_in_tool_call_delta():
-    """PII placeholders in streaming tool_call delta chunks are restored before yielding."""
+    """PII placeholders split across many streaming tool_call delta chunks are restored."""
     from unittest.mock import patch
     from gateway.domain.sanitizers.base import BaseSanitizer, SanitizerChain
 
@@ -908,17 +908,19 @@ async def test_complete_stream_restores_pii_in_tool_call_delta():
                     )
                 return SanitizeResult(text=text)
 
-        tool_delta = {
-            "tool_calls": [{"index": 0, "function": {
-                "arguments": json.dumps({"to": placeholder})
-            }}]
-        }
+        # Simulate real OpenAI streaming: arguments arrive character-by-character,
+        # so the placeholder is split across many delta chunks.
+        full_args = json.dumps({"to": placeholder, "subject": "Hello"})
+        arg_chunks = [c for c in full_args]  # one character per chunk
 
         a = MagicMock()
         a.name = "mock"
 
         async def _stream_chat(request, usage_out=None):
-            yield tool_delta
+            yield {"tool_calls": [{"index": 0, "id": "c1", "type": "function",
+                                   "function": {"name": "send_email", "arguments": ""}}]}
+            for fragment in arg_chunks:
+                yield {"tool_calls": [{"index": 0, "function": {"arguments": fragment}}]}
 
         a.stream_chat = _stream_chat
 
@@ -935,10 +937,14 @@ async def test_complete_stream_restores_pii_in_tool_call_delta():
             tools=[{"type": "function", "function": {"name": "send_email"}}],
         ))
 
-        assert len(chunks) == 1
-        delta = chunks[0]
-        assert isinstance(delta, dict)
-        args_str = delta["tool_calls"][0]["function"]["arguments"]
-        args = json.loads(args_str)
+        # True streaming: many delta chunks arrive, but assembled args have original value
+        dict_chunks = [c for c in chunks if isinstance(c, dict)]
+        assert len(dict_chunks) > 1  # real streaming, not one consolidated chunk
+        all_args = "".join(
+            tc.get("function", {}).get("arguments", "")
+            for c in dict_chunks
+            for tc in c.get("tool_calls", [])
+        )
+        args = json.loads(all_args)
         assert args["to"] == "john@example.com"
-        assert placeholder not in args_str
+        assert placeholder not in all_args
