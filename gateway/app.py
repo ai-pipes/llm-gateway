@@ -93,6 +93,7 @@ def create_app(config_path: str = "gateway.yaml") -> FastAPI:
                 name=adapter_conf.name,
                 base_url=adapter_conf.base_url,
                 api_key=api_key,
+                include_stream_usage=adapter_conf.include_stream_usage,
             )
         elif adapter_conf.type == "plugin":
             mod_path, cls_name = adapter_conf.module.rsplit(".", 1)

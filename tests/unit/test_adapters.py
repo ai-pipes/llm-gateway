@@ -19,7 +19,7 @@ def test_chat_request_defaults():
         model="gpt-4o",
         messages=[ChatMessage(role="user", content="hi")],
     )
-    assert req.temperature == 0.7
+    assert req.temperature is None
     assert req.stream is False
 
 
@@ -120,7 +120,7 @@ async def test_openai_adapter_sends_correct_request(adapter):
     body = call_kwargs.kwargs["json"]
     assert body["model"] == "gpt-4o"
     assert body["messages"] == [{"role": "user", "content": "Hi"}]
-    assert "temperature" in body
+    assert "temperature" not in body  # temperature omitted when not specified by client
 
 
 async def test_openai_adapter_raises_on_http_error(adapter):

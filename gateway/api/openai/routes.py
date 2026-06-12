@@ -33,6 +33,7 @@ def create_router(chat_service: ChatService) -> APIRouter:
                 request_id=request_id,
                 adapter_name=body.get("adapter"),
                 tools=body.get("tools"),
+                temperature=body.get("temperature"),
             )
         except SanitizerBlockedError as e:
             return JSONResponse(
@@ -116,6 +117,7 @@ async def _sse_stream(
             request_id=request_id,
             adapter_name=body.get("adapter"),
             tools=body.get("tools"),
+            temperature=body.get("temperature"),
         ):
             if isinstance(chunk, str):
                 yield _chunk(chunk)

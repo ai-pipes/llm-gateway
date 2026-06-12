@@ -53,10 +53,10 @@ def _audit():
     return b
 
 
-def _service(input_chain=None, registry=None, audit=None, log_body=False):
+def _service(input_chain=None, output_chain=None, registry=None, audit=None, log_body=False):
     return ChatService(
         input_chain=input_chain or _chain(),
-        output_chain=_chain(),
+        output_chain=output_chain or SanitizerChain([]),
         registry=registry or _registry(),
         audit=audit or _audit(),
         log_body=log_body,

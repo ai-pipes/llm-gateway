@@ -93,6 +93,7 @@ class ChatService:
         request_id: str,
         adapter_name: str | None = None,
         tools: list[dict] | None = None,
+        temperature: float | None = None,
     ) -> ChatResponse:
         start = time.monotonic()
         context = RestorationContext()
@@ -111,6 +112,7 @@ class ChatService:
             model=model,
             messages=[ChatMessage(**m) for m in sanitized_messages],
             tools=tools,
+            temperature=temperature,
         )
 
         try:
@@ -136,6 +138,13 @@ class ChatService:
             ))
             raise UpstreamError(str(exc)) from exc
 
+        # Apply output sanitizer BEFORE PII restoration so audit never stores raw PII
+        output_actions: list[str] = []
+        if response.content is not None:
+            out_result = await self._output.run(response.content)
+            output_actions = out_result.actions
+            response = dataclasses.replace(response, content=out_result.text)
+
         # Save sanitized content for audit BEFORE restoring PII (audit must not log raw PII)
         sanitized_content = response.content
         if context.has_replacements():
@@ -150,7 +159,7 @@ class ChatService:
             prompt_tokens=response.usage.get("prompt_tokens", 0),
             completion_tokens=response.usage.get("completion_tokens", 0),
             latency_ms=_ms(start),
-            input_actions=input_actions, output_actions=[],
+            input_actions=input_actions, output_actions=output_actions,
             status="success",
             messages=sanitized_messages if self._log_body else None,
             completion=sanitized_content if self._log_body else None,
@@ -166,6 +175,7 @@ class ChatService:
         request_id: str,
         adapter_name: str | None = None,
         tools: list[dict] | None = None,
+        temperature: float | None = None,
     ) -> AsyncGenerator[str | dict, None]:
         start = time.monotonic()
         context = RestorationContext()
@@ -185,14 +195,19 @@ class ChatService:
             messages=[ChatMessage(**m) for m in sanitized_messages],
             stream=True,
             tools=tools,
+            temperature=temperature,
         )
 
-        restorer = StreamingRestorer(context) if context.has_replacements() else None
+        has_output = bool(self._output)
+        # StreamingRestorer is only used for unbuffered streaming (no output sanitizer).
+        # When output sanitizers are active, all text is buffered and bulk-restored after.
+        restorer = StreamingRestorer(context) if (context.has_replacements() and not has_output) else None
         chunks: list[str] = []          # raw chunks for audit (placeholder version, not restored)
         usage_out: dict = {}             # populated by adapter from the trailing usage SSE chunk
         status = "success"
         error: str | None = None
         stream_complete = False          # True only when the async for loop exits normally
+        output_actions: list[str] = []
         # Per tool_call index restorer: buffers only around placeholder boundaries,
         # emits everything else immediately — preserving true argument streaming.
         tc_restorers: dict[int, StreamingRestorer] = {}
@@ -201,7 +216,9 @@ class ChatService:
             async for chunk in adapter.stream_chat(chat_request, usage_out=usage_out):
                 if isinstance(chunk, str):
                     chunks.append(chunk)
-                    if restorer:
+                    if has_output:
+                        pass  # buffer all text; yield after output sanitizer runs below
+                    elif restorer:
                         safe = restorer.feed(chunk)
                         if safe:
                             yield safe
@@ -230,10 +247,20 @@ class ChatService:
                 if tail:
                     yield {"tool_calls": [{"index": idx, "function": {"arguments": tail}}]}
 
-            if restorer:
-                tail = restorer.finalize()
-                if tail:
-                    yield tail
+            if has_output:
+                # Apply output sanitizer to full buffered text, then restore PII and yield.
+                # Audit (in finally) receives the sanitized pre-restoration version.
+                full_raw = "".join(chunks)
+                if full_raw:
+                    out_result = await self._output.run(full_raw)
+                    output_actions = out_result.actions
+                    client_text = context.restore(out_result.text) if context.has_replacements() else out_result.text
+                    yield client_text
+            else:
+                if restorer:
+                    tail = restorer.finalize()
+                    if tail:
+                        yield tail
             stream_complete = True
 
         except httpx.TimeoutException:
@@ -250,7 +277,6 @@ class ChatService:
             if not stream_complete and status == "success":
                 status = "cancelled"    # loop interrupted before normal exit → client disconnected
             full_text = "".join(chunks)
-            output_actions: list[str] = []
             completion: str | None = None
 
             if self._log_body and full_text:

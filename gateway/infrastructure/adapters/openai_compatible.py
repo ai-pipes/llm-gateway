@@ -11,11 +11,19 @@ class OpenAICompatibleAdapter(BaseLLMAdapter):
     Настраивается через gateway.yaml без написания кода.
     """
 
-    def __init__(self, name: str, base_url: str, api_key: str, timeout: float = 30.0):
+    def __init__(
+        self,
+        name: str,
+        base_url: str,
+        api_key: str,
+        timeout: float = 30.0,
+        include_stream_usage: bool = True,
+    ):
         self.name = name
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
+        self._include_stream_usage = include_stream_usage
 
     def __repr__(self) -> str:
         return f"OpenAICompatibleAdapter(name={self.name!r}, base_url={self._base_url!r})"
@@ -33,13 +41,15 @@ class OpenAICompatibleAdapter(BaseLLMAdapter):
         payload: dict = {
             "model": request.model,
             "messages": messages,
-            "temperature": request.temperature,
         }
+        if request.temperature is not None:
+            payload["temperature"] = request.temperature
         if request.tools:
             payload["tools"] = request.tools
         if stream:
             payload["stream"] = True
-            payload["stream_options"] = {"include_usage": True}
+            if self._include_stream_usage:
+                payload["stream_options"] = {"include_usage": True}
         return payload
 
     async def chat(self, request: ChatRequest) -> ChatResponse:

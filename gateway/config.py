@@ -38,6 +38,7 @@ class OpenAICompatibleAdapterConfig(BaseModel):
     base_url: str
     auth: AdapterAuthConfig
     default: bool = False
+    include_stream_usage: bool = True
 
 
 class PluginAdapterConfig(BaseModel):

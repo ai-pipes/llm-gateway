@@ -27,6 +27,9 @@ class SanitizerChain:
     def __init__(self, sanitizers: list[BaseSanitizer]):
         self._sanitizers = sanitizers
 
+    def __bool__(self) -> bool:
+        return bool(self._sanitizers)
+
     async def run(
         self, text: str, context: "RestorationContext | None" = None
     ) -> SanitizeResult:

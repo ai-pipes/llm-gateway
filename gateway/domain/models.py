@@ -21,7 +21,7 @@ class ChatMessage:
 class ChatRequest:
     model: str
     messages: list[ChatMessage]
-    temperature: float = 0.7
+    temperature: float | None = None
     stream: bool = False
     tools: list[dict] | None = None
 

@@ -24,6 +24,7 @@ adapters:
     base_url: "https://api.openai.com/v1"
     auth:
       token_env: OPENAI_API_KEY   # read from environment variable
+    # include_stream_usage: true   # set false for providers that reject stream_options (Ollama, LM Studio, etc.)
     default: true
 
   # Option 2: custom adapter (Python class)
