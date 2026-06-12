@@ -33,7 +33,7 @@ adapters:
 
 sanitizers:
   input:
-    # Option A: NLP-based PII detection via spaCy + Microsoft Presidio
+    # Option A: NLP-based PII detection via spaCy + Microsoft Presidio (higher recall)
     # Requires: pip install -e ".[presidio]" && python -m spacy download en_core_web_lg
     - module: "gateway.infrastructure.sanitizers.presidio_sanitizer.PresidioSanitizer"
       config:
@@ -42,7 +42,7 @@ sanitizers:
     # Option B: regex-based PII detection — no extra dependencies
     # - module: "gateway.infrastructure.sanitizers.pii_regex.PiiRegexSanitizer"
     #   config:
-    #     mode: replace   # replace → [EMAIL]/[PHONE]/[CARD] | block → 400
+    #     mode: replace   # replace → placeholder | block → 400
 
   output: []
 

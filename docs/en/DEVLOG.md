@@ -4,6 +4,36 @@ A chronological development journal. This is where the thought process, dead end
 
 ---
 
+## v3.4 — Tools Passthrough + PII Restoration in Tool Calls (2026-06-12)
+
+**No breaking changes.** Clients can now pass `tools` in any request; the gateway proxies them transparently to the upstream LLM and returns `tool_calls` to the client. The client owns the agentic loop.
+
+### Why client-owned tools
+
+The alternative was a gateway-side tool registry: the gateway knows about Sentry MCP, internal APIs, etc., and injects the right schemas based on the client. Rejected for the same reason we rejected hardcoding adapters: every new tool would require a gateway deploy, and tool schemas drift from the actual implementations over time. The gateway is a proxy, not a service mesh. Clients send what they need.
+
+### PII restoration in tool_call arguments
+
+The input sanitizer replaces `john@example.com` with `[EMAIL_ADDRESS_3f2a1b0c]` before the LLM sees it. The LLM may echo that placeholder into a `send_email(to="[EMAIL_ADDRESS_3f2a1b0c]")` tool call argument. Without restoration, the client receives the placeholder — the tool call is broken.
+
+**Non-streaming fix:** serialize `response.tool_calls` to JSON, run `context.restore()`, parse back. The placeholder is a contiguous string within the serialized JSON, so simple string replace works.
+
+**Streaming fix:** tool_call arguments arrive character by character across many SSE chunks. `[EMAIL_ADDRESS_3f2a1b0c]` may arrive as `[`, `EMAIL`, `_ADDRESS_3`, `f2a1b0c]` — four separate events. A per-chunk `str.replace()` won't find it.
+
+Solution: a separate `StreamingRestorer` per `tool_call index`. Same look-ahead buffer logic used for text content (v3.3), applied to the argument stream for each tool call. Characters before `[` are forwarded immediately. The buffer only holds bytes that could be the start of a placeholder. When a complete placeholder is matched, the original value is emitted in one chunk. Hold-back is bounded by the placeholder length (~26 chars).
+
+This gives true argument streaming — fragments appear at the client in real time, with a delay only around the placeholder region itself. The consolidated-buffer approach (buffer all argument deltas, emit one chunk at the end) was implemented first but reverted: it was simpler but broke streaming for tool calls when PII was present.
+
+### Behaviour of `[` and `]` in normal text
+
+The restorer's `_probe()` only buffers when the buffer is a prefix of a registered placeholder. `[category]` triggers a one-chunk hold on `[`; as soon as `c` arrives, the prefix check fails and `[` is emitted immediately. No content is dropped. A false positive (LLM generates a string identical to a registered placeholder) requires guessing a 4-byte random hex suffix — 2³² possibilities, negligible in practice.
+
+### finish_reason in streaming
+
+The upstream sends `finish_reason: "stop"` in the final SSE chunk whether or not tool calls were made. We can't trust it. The fix: track `has_tool_calls` during the stream, override `finish_reason` to `"tool_calls"` if any tool_call delta was seen.
+
+---
+
 ## v3.3 — Streaming PII Restoration (2026-06-12)
 
 **No breaking changes.** `complete_stream()` now restores PII with true TTFF — max hold-back is the length of the longest registered placeholder (~26 chars).
