@@ -25,6 +25,7 @@ Source = "https://github.com/ai-pipes/llm-gateway"
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "httpx2>=2.4.0",
 ]
 presidio = [
     "presidio-analyzer>=2.2.0",
