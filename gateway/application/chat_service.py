@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import time
 import httpx
 from datetime import datetime, timezone
@@ -137,8 +138,12 @@ class ChatService:
 
         # Save sanitized content for audit BEFORE restoring PII (audit must not log raw PII)
         sanitized_content = response.content
-        if context.has_replacements() and response.content is not None:
-            response = dataclasses.replace(response, content=context.restore(response.content))
+        if context.has_replacements():
+            if response.content is not None:
+                response = dataclasses.replace(response, content=context.restore(response.content))
+            if response.tool_calls is not None:
+                restored = json.loads(context.restore(json.dumps(response.tool_calls)))
+                response = dataclasses.replace(response, tool_calls=restored)
 
         await self._audit.write(self._record(
             request_id=request_id, auth=auth, adapter=adapter.name, model=response.model,
@@ -200,7 +205,9 @@ class ChatService:
                     else:
                         yield chunk
                 else:
-                    # dict chunk (tool_call delta) — pass through without sanitization
+                    # dict chunk (tool_call delta) — restore PII placeholders if needed
+                    if context.has_replacements():
+                        chunk = json.loads(context.restore(json.dumps(chunk)))
                     yield chunk
             if restorer:
                 tail = restorer.finalize()

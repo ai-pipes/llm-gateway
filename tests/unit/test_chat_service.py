@@ -1,4 +1,5 @@
 # tests/unit/test_chat_service.py
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from gateway.application.chat_service import ChatService
@@ -832,3 +833,112 @@ async def test_complete_stream_injects_system_instruction_when_replacements():
         system_msgs = [m for m in messages if m.role == "system"]
         assert system_msgs, "system message should be injected"
         assert "placeholder" in system_msgs[0].content.lower()
+
+
+# ---------------------------------------------------------------------------
+# PII restoration in tool_call arguments
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_complete_restores_pii_in_tool_call_arguments():
+    """PII placeholders inside tool_call arguments are restored to original values."""
+    from unittest.mock import patch
+    from gateway.domain.sanitizers.base import BaseSanitizer, SanitizerChain
+
+    with patch("gateway.domain.sanitizers.restoration.secrets.token_hex", return_value="aabbccdd"):
+        placeholder = "[EMAIL_ADDRESS_aabbccdd]"
+
+        class EmailSanitizer(BaseSanitizer):
+            async def sanitize(self, text: str, context=None) -> SanitizeResult:
+                if context is not None and "john@example.com" in text:
+                    ph = context.register("john@example.com", "EMAIL_ADDRESS")
+                    return SanitizeResult(
+                        text=text.replace("john@example.com", ph),
+                        actions=["replaced:EMAIL_ADDRESS"],
+                    )
+                return SanitizeResult(text=text)
+
+        async def _chat(req):
+            return ChatResponse(
+                model="mock", usage={},
+                tool_calls=[{"id": "c1", "type": "function", "function": {
+                    "name": "send_email",
+                    "arguments": json.dumps({"to": placeholder}),
+                }}],
+            )
+
+        a = MagicMock()
+        a.name = "mock"
+        a.chat = _chat
+
+        svc = ChatService(
+            input_chain=SanitizerChain([EmailSanitizer()]),
+            output_chain=SanitizerChain([]),
+            registry=_registry(adapter=a),
+            audit=_audit(),
+            log_body=False,
+        )
+        response = await svc.complete(
+            raw_messages=[{"role": "user", "content": "Send email to john@example.com"}],
+            model="gpt-mock", auth=_auth(), request_id="r-tool-pii",
+            tools=[{"type": "function", "function": {"name": "send_email"}}],
+        )
+
+        args = json.loads(response.tool_calls[0]["function"]["arguments"])
+        assert args["to"] == "john@example.com"
+        assert placeholder not in response.tool_calls[0]["function"]["arguments"]
+
+
+@pytest.mark.asyncio
+async def test_complete_stream_restores_pii_in_tool_call_delta():
+    """PII placeholders in streaming tool_call delta chunks are restored before yielding."""
+    from unittest.mock import patch
+    from gateway.domain.sanitizers.base import BaseSanitizer, SanitizerChain
+
+    with patch("gateway.domain.sanitizers.restoration.secrets.token_hex", return_value="aabbccdd"):
+        placeholder = "[EMAIL_ADDRESS_aabbccdd]"
+
+        class EmailSanitizer(BaseSanitizer):
+            async def sanitize(self, text: str, context=None) -> SanitizeResult:
+                if context is not None and "john@example.com" in text:
+                    ph = context.register("john@example.com", "EMAIL_ADDRESS")
+                    return SanitizeResult(
+                        text=text.replace("john@example.com", ph),
+                        actions=["replaced:EMAIL_ADDRESS"],
+                    )
+                return SanitizeResult(text=text)
+
+        tool_delta = {
+            "tool_calls": [{"index": 0, "function": {
+                "arguments": json.dumps({"to": placeholder})
+            }}]
+        }
+
+        a = MagicMock()
+        a.name = "mock"
+
+        async def _stream_chat(request, usage_out=None):
+            yield tool_delta
+
+        a.stream_chat = _stream_chat
+
+        svc = ChatService(
+            input_chain=SanitizerChain([EmailSanitizer()]),
+            output_chain=SanitizerChain([]),
+            registry=_registry(adapter=a),
+            audit=_audit(),
+            log_body=False,
+        )
+        chunks = await _collect_stream(svc.complete_stream(
+            raw_messages=[{"role": "user", "content": "Send email to john@example.com"}],
+            model="gpt-mock", auth=_auth(), request_id="st-pii",
+            tools=[{"type": "function", "function": {"name": "send_email"}}],
+        ))
+
+        assert len(chunks) == 1
+        delta = chunks[0]
+        assert isinstance(delta, dict)
+        args_str = delta["tool_calls"][0]["function"]["arguments"]
+        args = json.loads(args_str)
+        assert args["to"] == "john@example.com"
+        assert placeholder not in args_str
