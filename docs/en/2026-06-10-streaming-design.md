@@ -44,13 +44,13 @@ Chunk-by-chunk sanitization is unreliable: a PII detector (NER model) requires f
 
 More importantly: the output sanitizer protects against leaking PII to the client. It makes sense when the **gateway knows more than the client** — for example, a RAG system with data from all users. If that scenario does not apply, an output sanitizer on the response provides little value.
 
-For **audit logs**, the output sanitizer remains useful — to prevent PII from entering compliance logs. The solution: run it after the fact on the full collected text, only when `log_body: true`.
+For **audit logs**, the benefit is also unclear: if PII appears in the LLM response, it got there from the client's request — which is already sanitized on input. The audit stores the placeholder version of input messages, which is sufficient. The output sanitizer has been removed from the audit body logging path as well (v3.5).
 
 ### Summary
 
 ```
 Input sanitizer:  full messages (as always) → unchanged
-Output sanitizer: only for audit body logging, after the fact
+Output sanitizer: not applied to the LLM response
 Audit:            written in finally after the stream completes
 Client:           receives tokens immediately — true TTFF
 ```
@@ -75,7 +75,7 @@ Request → input sanitize → adapter.stream_chat()
                                    │
                            [DONE] / disconnect
                                    │
-                         join(buffer) → output sanitize (if log_body=True)
+                         join(buffer)
                                    │
                          audit.write()  ← guaranteed via finally
 ```
@@ -129,7 +129,7 @@ New method `complete_stream()` — async generator with `try/finally`:
 
 - Phase 1 (before the first yield): input sanitization + adapter lookup. Errors here (`SanitizerBlockedError`, `AdapterNotFoundError`) write audit and raise an exception before the stream starts — the client receives HTTP 400 before headers are committed.
 - Phase 2 (streaming): `try/except/finally` around `async for chunk in adapter.stream_chat()`. Each chunk is immediately yielded to the client and simultaneously appended to the buffer.
-- Phase 3 (`finally`): guaranteed to execute on success, error, and client disconnect (GeneratorExit). Assembles the full text, runs the output sanitizer (if `log_body=True`), writes audit.
+- Phase 3 (`finally`): guaranteed to execute on success, error, and client disconnect (GeneratorExit). Assembles the full text, writes audit.
 
 **Audit statuses during streaming:**
 
@@ -177,7 +177,7 @@ This is an accepted trade-off: most production providers (OpenAI, Anthropic, vLL
 
 | Aspect | Decision | Trade-off |
 |---|---|---|
-| Output sanitizer on the response | Removed from critical path | Response to client is not sanitized; only audit body logging is sanitized |
+| Output sanitizer on the response | Removed entirely (v3.5) | Response to client is not sanitized; audit body logging stores raw text |
 | Audit | After the fact in `finally` | Audit does not block the first token; if audit fails — the client has already received the response |
 | Usage tokens | Best-effort from the last chunk | Zeros if the provider does not support it |
 | Model in audit | Requested model, not resolved | vLLM/proxy may map aliases — there is no response object in streaming |
@@ -228,7 +228,7 @@ data: [DONE]
 | `test_complete_stream_yields_chunks` | chunks reach the caller |
 | `test_complete_stream_writes_audit_after_stream` | audit is written after the stream |
 | `test_complete_stream_no_body_logging_by_default` | `completion=None` without `log_body` |
-| `test_complete_stream_body_logging_sanitizes_output` | output sanitizer runs on the full text for audit |
+| `test_complete_stream_body_logging_records_raw_output` | completion in audit contains raw text (output sanitizer not applied) |
 | `test_complete_stream_blocked_input_raises_before_yielding` | blocked → audit + exception before yield |
 | `test_complete_stream_adapter_not_found_raises_before_yielding` | not found → audit + exception before yield |
 | `test_complete_stream_upstream_timeout_writes_audit` | timeout → `error` in audit |

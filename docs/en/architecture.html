@@ -153,8 +153,7 @@ sequenceDiagram
   <!-- ── 3. Streaming ── -->
   <h2>3. Streaming flow <span class="badge badge-info">complete_stream()</span></h2>
   <p class="note">
-    Tokens are sent to the client immediately — true TTFF. Output sanitizer removed from the client path;
-    runs post-factum on the full text only for audit body logging.
+    Tokens are sent to the client immediately — true TTFF. Output sanitizer removed entirely — not applied to the LLM response.
     Audit is guaranteed via <code>finally</code> — on success, error, and disconnect.
   </p>
   <div class="diagram-card">
@@ -254,7 +253,7 @@ sequenceDiagram
   <p class="note">
     <code>messages</code> and <code>completion</code> are <code>None</code> by default.
     Populated only when <code>audit.body_logging.enabled: true</code>.
-    For streaming, <code>completion</code> is the output-sanitized full text from the buffer.
+    For streaming, <code>completion</code> is the raw full text assembled from buffered chunks.
   </p>
   <div class="diagram-card">
     <div class="mermaid">

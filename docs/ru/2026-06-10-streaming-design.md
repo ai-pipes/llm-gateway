@@ -44,13 +44,13 @@ Chunk-by-chunk санитайзация ненадёжна: PII-детектор
 
 Но главное: output sanitizer защищает от утечки PII клиенту. Имеет смысл, если **gateway знает больше, чем клиент** — например, RAG с данными всех пользователей. Если такого сценария нет, output sanitizer на ответе малополезен.
 
-Для **audit логов** output sanitizer остаётся полезным — не пускать PII в compliance-логи. Решение: запускать его постфактум на полном собранном тексте только при `log_body: true`.
+Для **audit логов** польза тоже неочевидна: если PII появляется в ответе LLM, оно попало туда из запроса клиента — который уже санитайзирован на входе. Audit хранит placeholder-версию входных сообщений, чего достаточно. Output sanitizer убран и из пути audit body logging (v3.5).
 
 ### Итог
 
 ```
 Input sanitizer:  full messages (как всегда) → без изменений
-Output sanitizer: только для audit body logging, постфактум
+Output sanitizer: не применяется к ответу LLM
 Audit:            пишется в finally после завершения стрима
 Клиент:           получает токены сразу — настоящий TTFF
 ```
@@ -75,7 +75,7 @@ Request → input sanitize → adapter.stream_chat()
                                    │
                            [DONE] / disconnect
                                    │
-                         join(buffer) → output sanitize (если log_body=True)
+                         join(buffer)
                                    │
                          audit.write()  ← гарантирован через finally
 ```
@@ -129,7 +129,7 @@ async def stream_chat(self, request, usage_out=None):
 
 - Фаза 1 (до первого yield): input sanitization + adapter lookup. Ошибки здесь (`SanitizerBlockedError`, `AdapterNotFoundError`) пишут audit и поднимают исключение до начала стрима — клиент получает HTTP 400 до коммита заголовков.
 - Фаза 2 (streaming): `try/except/finally` вокруг `async for chunk in adapter.stream_chat()`. Каждый чанк немедленно yielded клиенту, параллельно добавляется в буфер.
-- Фаза 3 (`finally`): гарантированно выполняется при успехе, ошибке и дисконнекте клиента (GeneratorExit). Собирает полный текст, запускает output sanitizer (если `log_body=True`), пишет audit.
+- Фаза 3 (`finally`): гарантированно выполняется при успехе, ошибке и дисконнекте клиента (GeneratorExit). Собирает полный текст, пишет audit.
 
 **Статусы в audit при стриминге:**
 
@@ -177,7 +177,7 @@ data: [DONE]
 
 | Аспект | Решение | Трейдоф |
 |---|---|---|
-| Output sanitizer на ответе | Убран из критического пути | Ответ клиенту не санитайзируется; только audit body logging |
+| Output sanitizer на ответе | Убран полностью (v3.5) | Ответ клиенту не санитайзируется; audit body logging хранит сырой текст |
 | Audit | Постфактум в `finally` | Audit не блокирует первый токен; если audit упадёт — клиент уже получил ответ |
 | Usage токены | Best-effort из последнего чанка | Нули если провайдер не поддерживает |
 | Модель в audit | Requested model, не resolved | vLLM/proxy могут маппить aliases — в стриминге нет response объекта |
@@ -228,7 +228,7 @@ data: [DONE]
 | `test_complete_stream_yields_chunks` | чанки доходят до вызывающего |
 | `test_complete_stream_writes_audit_after_stream` | audit пишется после стрима |
 | `test_complete_stream_no_body_logging_by_default` | `completion=None` без `log_body` |
-| `test_complete_stream_body_logging_sanitizes_output` | output sanitizer на полном тексте для audit |
+| `test_complete_stream_body_logging_records_raw_output` | completion в audit содержит сырой текст (output sanitizer не применяется) |
 | `test_complete_stream_blocked_input_raises_before_yielding` | blocked → audit + исключение до yield |
 | `test_complete_stream_adapter_not_found_raises_before_yielding` | not found → audit + исключение до yield |
 | `test_complete_stream_upstream_timeout_writes_audit` | timeout → `error` в audit |

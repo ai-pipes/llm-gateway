@@ -2,7 +2,7 @@
 
 [Русский](README.ru.md)
 
-Corporate LLM Gateway — OpenAI-compatible proxy with audit trail, input/output sanitization, and pluggable adapters. Deploy in your corporate environment, connect any LLM.
+Corporate LLM Gateway — OpenAI-compatible proxy with audit trail, input sanitization, and pluggable adapters. Deploy in your corporate environment, connect any LLM.
 
 ## Quick Start
 

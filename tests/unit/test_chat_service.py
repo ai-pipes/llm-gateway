@@ -308,13 +308,12 @@ async def test_complete_stream_no_body_logging_by_default():
 
 
 @pytest.mark.asyncio
-async def test_complete_stream_body_logging_sanitizes_output():
+async def test_complete_stream_body_logging_records_raw_output():
     audit = _audit()
-    output_chain = _chain(actions=["replaced:EMAIL"])
     adapter = _streaming_adapter(chunks=["call me ", "john@example.com"])
     svc = ChatService(
         input_chain=_chain(),
-        output_chain=output_chain,
+        output_chain=_chain(),
         registry=_registry(adapter=adapter),
         audit=audit,
         log_body=True,
@@ -324,9 +323,7 @@ async def test_complete_stream_body_logging_sanitizes_output():
         model="gpt-mock", auth=_auth(), request_id="s-4",
     ))
     record: AuditRecord = audit.write.call_args[0][0]
-    # output_chain.run returns "sanitized" (from _chain() mock)
-    assert record.completion == "sanitized"
-    assert "replaced:EMAIL" in record.output_actions
+    assert record.completion == "call me john@example.com"
 
 
 @pytest.mark.asyncio

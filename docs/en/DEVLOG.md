@@ -4,6 +4,32 @@ A chronological development journal. This is where the thought process, dead end
 
 ---
 
+## v3.5 — Output Sanitizer Removed (2026-06-14)
+
+**No breaking changes.**
+
+### What changed
+
+The output sanitizer has been completely removed from the LLM response path — neither the client response nor audit body logging receives sanitized output.
+
+Previously (v3.1) the output sanitizer was removed from the "critical path" to the client, but for audit body logging (`log_body: true`) it still ran after the fact on the full text in `finally`. Now it is not applied anywhere to the LLM response.
+
+### Rationale
+
+An output sanitizer on the response only makes sense when the **gateway knows more than the client** — for example a RAG system that injects data from other users. In our scenario the client already knows everything the gateway knows. Sanitizing the response for the same client that requested it is pointless.
+
+The benefit for audit body logging is also unclear: if PII appears in the LLM response, it got there from the client's request — which is already sanitized on input. The audit stores the placeholder version of input messages, which is sufficient.
+
+The `output_chain` field in `ChatService` and the `sanitizers.output` config section remain in the code — the infrastructure is ready to wire up when a scenario arises where the gateway injects data from external sources.
+
+### Code changes
+
+- `ChatService.complete()`: removed the `self._output.run()` application block on `response.content`.
+- `ChatService.complete_stream()`: removed the `has_output` flag, chunk buffering for the output sanitizer, and the after-the-fact run in `finally`.
+- `output_actions` stays as empty `[]` in all audit records.
+
+---
+
 ## v3.4 — Tools Passthrough + PII Restoration in Tool Calls (2026-06-12)
 
 **No breaking changes.** Clients can now pass `tools` in any request; the gateway proxies them transparently to the upstream LLM and returns `tool_calls` to the client. The client owns the agentic loop.

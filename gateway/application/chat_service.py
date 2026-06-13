@@ -138,14 +138,9 @@ class ChatService:
             ))
             raise UpstreamError(str(exc)) from exc
 
-        # Apply output sanitizer BEFORE PII restoration so audit never stores raw PII
         output_actions: list[str] = []
-        if response.content is not None:
-            out_result = await self._output.run(response.content)
-            output_actions = out_result.actions
-            response = dataclasses.replace(response, content=out_result.text)
 
-        # Save sanitized content for audit BEFORE restoring PII (audit must not log raw PII)
+        # Save content for audit BEFORE restoring PII (audit must not log raw PII)
         sanitized_content = response.content
         if context.has_replacements():
             if response.content is not None:
@@ -198,10 +193,7 @@ class ChatService:
             temperature=temperature,
         )
 
-        has_output = bool(self._output)
-        # StreamingRestorer is only used for unbuffered streaming (no output sanitizer).
-        # When output sanitizers are active, all text is buffered and bulk-restored after.
-        restorer = StreamingRestorer(context) if (context.has_replacements() and not has_output) else None
+        restorer = StreamingRestorer(context) if context.has_replacements() else None
         chunks: list[str] = []          # raw chunks for audit (placeholder version, not restored)
         usage_out: dict = {}             # populated by adapter from the trailing usage SSE chunk
         status = "success"
@@ -216,9 +208,7 @@ class ChatService:
             async for chunk in adapter.stream_chat(chat_request, usage_out=usage_out):
                 if isinstance(chunk, str):
                     chunks.append(chunk)
-                    if has_output:
-                        pass  # buffer all text; yield after output sanitizer runs below
-                    elif restorer:
+                    if restorer:
                         safe = restorer.feed(chunk)
                         if safe:
                             yield safe
@@ -247,20 +237,10 @@ class ChatService:
                 if tail:
                     yield {"tool_calls": [{"index": idx, "function": {"arguments": tail}}]}
 
-            if has_output:
-                # Apply output sanitizer to full buffered text, then restore PII and yield.
-                # Audit (in finally) receives the sanitized pre-restoration version.
-                full_raw = "".join(chunks)
-                if full_raw:
-                    out_result = await self._output.run(full_raw)
-                    output_actions = out_result.actions
-                    client_text = context.restore(out_result.text) if context.has_replacements() else out_result.text
-                    yield client_text
-            else:
-                if restorer:
-                    tail = restorer.finalize()
-                    if tail:
-                        yield tail
+            if restorer:
+                tail = restorer.finalize()
+                if tail:
+                    yield tail
             stream_complete = True
 
         except httpx.TimeoutException:
@@ -280,9 +260,7 @@ class ChatService:
             completion: str | None = None
 
             if self._log_body and full_text:
-                out = await self._output.run(full_text)
-                completion = out.text
-                output_actions = out.actions
+                completion = full_text
 
             await self._audit.write(self._record(
                 request_id=request_id,
