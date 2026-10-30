@@ -2,6 +2,8 @@
 
 [Русский](README.ru.md)
 
+> **Lecture project.** Built as a teaching example for my lecture on keeping user data inside a closed corporate perimeter, so it never leaks to LLM providers. It shows the architecture; it is not a production-hardened product.
+
 Corporate LLM Gateway — OpenAI-compatible proxy with audit trail, input sanitization, and pluggable adapters. Deploy in your corporate environment, connect any LLM.
 
 ## Quick Start
